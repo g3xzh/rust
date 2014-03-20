@@ -1124,7 +1124,6 @@ mod tests {
     fn test_sum_overflow_f64() {
         let n = f64::MAX_VALUE;
         println!("{} ", [n, -n, n, n / 10.0].sum());
-        println!("{} ", [n, -n, n, 0.1 * n].sum());
         error!("n {} ; sum {}", n, [n, -n, n, n / 10.0].sum())
     }
 }
