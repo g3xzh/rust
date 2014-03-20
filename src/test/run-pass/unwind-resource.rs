@@ -10,37 +10,35 @@
 
 // ignore-fast
 
-extern crate extra;
-
 use std::task;
 
 struct complainer {
-  c: Chan<bool>,
+    tx: Sender<bool>,
 }
 
 impl Drop for complainer {
     fn drop(&mut self) {
-        error!("About to send!");
-        self.c.send(true);
-        error!("Sent!");
+        println!("About to send!");
+        self.tx.send(true);
+        println!("Sent!");
     }
 }
 
-fn complainer(c: Chan<bool>) -> complainer {
-    error!("Hello!");
+fn complainer(tx: Sender<bool>) -> complainer {
+    println!("Hello!");
     complainer {
-        c: c
+        tx: tx
     }
 }
 
-fn f(c: Chan<bool>) {
-    let _c = complainer(c);
+fn f(tx: Sender<bool>) {
+    let _tx = complainer(tx);
     fail!();
 }
 
 pub fn main() {
-    let (p, c) = Chan::new();
-    task::spawn(proc() f(c.clone()));
-    error!("hiiiiiiiii");
-    assert!(p.recv());
+    let (tx, rx) = channel();
+    task::spawn(proc() f(tx.clone()));
+    println!("hiiiiiiiii");
+    assert!(rx.recv());
 }

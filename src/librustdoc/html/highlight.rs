@@ -18,7 +18,6 @@ use std::io;
 
 use syntax::parse;
 use syntax::parse::lexer;
-use syntax::diagnostic;
 use syntax::codemap::{BytePos, Span};
 
 use html::escape::Escape;
@@ -26,15 +25,14 @@ use html::escape::Escape;
 use t = syntax::parse::token;
 
 /// Highlights some source code, returning the HTML output.
-pub fn highlight(src: &str) -> ~str {
+pub fn highlight(src: &str, class: Option<&str>) -> ~str {
     let sess = parse::new_parse_sess();
-    let handler = diagnostic::mk_handler();
-    let span_handler = diagnostic::mk_span_handler(handler, sess.cm);
-    let fm = parse::string_to_filemap(sess, src.to_owned(), ~"<stdin>");
+    let fm = parse::string_to_filemap(&sess, src.to_owned(), ~"<stdin>");
 
     let mut out = io::MemWriter::new();
-    doit(sess,
-         lexer::new_string_reader(span_handler, fm),
+    doit(&sess,
+         lexer::new_string_reader(&sess.span_diagnostic, fm),
+         class,
          &mut out).unwrap();
     str::from_utf8_lossy(out.unwrap()).into_owned()
 }
@@ -46,14 +44,15 @@ pub fn highlight(src: &str) -> ~str {
 /// it's used. All source code emission is done as slices from the source map,
 /// not from the tokens themselves, in order to stay true to the original
 /// source.
-fn doit(sess: @parse::ParseSess, lexer: lexer::StringReader,
+fn doit(sess: &parse::ParseSess, lexer: lexer::StringReader, class: Option<&str>,
         out: &mut Writer) -> io::IoResult<()> {
     use syntax::parse::lexer::Reader;
 
-    try!(write!(out, "<pre class='rust'>\n"));
+    try!(write!(out, "<pre class='rust {}'>\n", class.unwrap_or("")));
     let mut last = BytePos(0);
     let mut is_attribute = false;
     let mut is_macro = false;
+    let mut is_macro_nonterminal = false;
     loop {
         let next = lexer.next_token();
         let test = if next.tok == t::EOF {lexer.pos.get()} else {next.sp.lo};
@@ -66,7 +65,7 @@ fn doit(sess: @parse::ParseSess, lexer: lexer::StringReader,
         // comment. This will classify some whitespace as a comment, but that
         // doesn't matter too much for syntax highlighting purposes.
         if test > last {
-            let snip = sess.cm.span_to_snippet(Span {
+            let snip = sess.span_diagnostic.cm.span_to_snippet(Span {
                 lo: last,
                 hi: test,
                 expn_info: None,
@@ -101,8 +100,15 @@ fn doit(sess: @parse::ParseSess, lexer: lexer::StringReader,
             // miscellaneous, no highlighting
             t::DOT | t::DOTDOT | t::DOTDOTDOT | t::COMMA | t::SEMI |
                 t::COLON | t::MOD_SEP | t::LARROW | t::DARROW | t::LPAREN |
-                t::RPAREN | t::LBRACKET | t::LBRACE | t::RBRACE |
-                t::DOLLAR => "",
+                t::RPAREN | t::LBRACKET | t::LBRACE | t::RBRACE => "",
+            t::DOLLAR => {
+                if t::is_ident(&lexer.peek().tok) {
+                    is_macro_nonterminal = true;
+                    "macro-nonterminal"
+                } else {
+                    ""
+                }
+            }
 
             // This is the start of an attribute. We're going to want to
             // continue highlighting it as an attribute until the ending ']' is
@@ -143,7 +149,10 @@ fn doit(sess: @parse::ParseSess, lexer: lexer::StringReader,
 
                     _ if t::is_any_keyword(&next.tok) => "kw",
                     _ => {
-                        if lexer.peek().tok == t::NOT {
+                        if is_macro_nonterminal {
+                            is_macro_nonterminal = false;
+                            "macro-nonterminal"
+                        } else if lexer.peek().tok == t::NOT {
                             is_macro = true;
                             "macro"
                         } else {
@@ -160,7 +169,7 @@ fn doit(sess: @parse::ParseSess, lexer: lexer::StringReader,
 
         // as mentioned above, use the original source code instead of
         // stringifying this token
-        let snip = sess.cm.span_to_snippet(next.sp).unwrap();
+        let snip = sess.span_diagnostic.cm.span_to_snippet(next.sp).unwrap();
         if klass == "" {
             try!(write!(out, "{}", Escape(snip)));
         } else {
@@ -171,4 +180,3 @@ fn doit(sess: @parse::ParseSess, lexer: lexer::StringReader,
 
     write!(out, "</pre>\n")
 }
-

@@ -322,7 +322,7 @@ CSREQ$(1)_T_$(2)_H_$(3) = \
 	$$(foreach dep,$$(HOST_CRATES),$$(HLIB$(1)_H_$(3))/stamp.$$(dep))
 
 ifeq ($(1),0)
-# Don't run the the stage0 compiler under valgrind - that ship has sailed
+# Don't run the stage0 compiler under valgrind - that ship has sailed
 CFG_VALGRIND_COMPILE$(1) =
 else
 CFG_VALGRIND_COMPILE$(1) = $$(CFG_VALGRIND_COMPILE)
@@ -345,10 +345,10 @@ endif
 ifdef CFG_DISABLE_RPATH
 ifeq ($$(OSTYPE_$(3)),apple-darwin)
   RPATH_VAR$(1)_T_$(2)_H_$(3) := \
-      DYLD_LIBRARY_PATH="$$$$DYLD_LIBRARY_PATH:$$(HLIB$(1)_H_$(3))"
+      DYLD_LIBRARY_PATH="$$$$DYLD_LIBRARY_PATH:$$(CURDIR)/$$(HLIB$(1)_H_$(3))"
 else
   RPATH_VAR$(1)_T_$(2)_H_$(3) := \
-      LD_LIBRARY_PATH="$$$$LD_LIBRARY_PATH:$$(HLIB$(1)_H_$(3))"
+      LD_LIBRARY_PATH="$$$$LD_LIBRARY_PATH:$$(CURDIR)/$$(HLIB$(1)_H_$(3))"
 endif
 else
     RPATH_VAR$(1)_T_$(2)_H_$(3) :=

@@ -71,7 +71,7 @@ The raw C API needs to be wrapped to provide memory safety and make use of highe
 like vectors. A library can choose to expose only the safe, high-level interface and hide the unsafe
 internal details.
 
-Wrapping the functions which expect buffers involves using the `vec::raw` module to manipulate Rust
+Wrapping the functions which expect buffers involves using the `slice::raw` module to manipulate Rust
 vectors as pointers to memory. Rust's vectors are guaranteed to be a contiguous block of memory. The
 length is number of elements currently contained, and the capacity is the total size in elements of
 the allocated memory. The length is less than or equal to the capacity.
@@ -103,7 +103,7 @@ pub fn compress(src: &[u8]) -> ~[u8] {
         let psrc = src.as_ptr();
 
         let mut dstlen = snappy_max_compressed_length(srclen);
-        let mut dst = vec::with_capacity(dstlen as uint);
+        let mut dst = slice::with_capacity(dstlen as uint);
         let pdst = dst.as_mut_ptr();
 
         snappy_compress(psrc, srclen, pdst, &mut dstlen);
@@ -125,7 +125,7 @@ pub fn uncompress(src: &[u8]) -> Option<~[u8]> {
         let mut dstlen: size_t = 0;
         snappy_uncompressed_length(psrc, srclen, &mut dstlen);
 
-        let mut dst = vec::with_capacity(dstlen as uint);
+        let mut dst = slice::with_capacity(dstlen as uint);
         let pdst = dst.as_mut_ptr();
 
         if snappy_uncompress(psrc, srclen, pdst, &mut dstlen) == 0 {
@@ -170,85 +170,6 @@ Foreign libraries often hand off ownership of resources to the calling code.
 When this occurs, we must use Rust's destructors to provide safety and guarantee
 the release of these resources (especially in the case of failure).
 
-As an example, we give a reimplementation of owned boxes by wrapping `malloc`
-and `free`:
-
-~~~~
-use std::cast;
-use std::libc::{c_void, size_t, malloc, free};
-use std::mem;
-use std::ptr;
-
-// Define a wrapper around the handle returned by the foreign code.
-// Unique<T> has the same semantics as ~T
-pub struct Unique<T> {
-    // It contains a single raw, mutable pointer to the object in question.
-    priv ptr: *mut T
-}
-
-// Implement methods for creating and using the values in the box.
-// NB: For simplicity and correctness, we require that T has kind Send
-// (owned boxes relax this restriction, and can contain managed (GC) boxes).
-// This is because, as implemented, the garbage collector would not know
-// about any shared boxes stored in the malloc'd region of memory.
-impl<T: Send> Unique<T> {
-    pub fn new(value: T) -> Unique<T> {
-        unsafe {
-            let ptr = malloc(std::mem::size_of::<T>() as size_t) as *mut T;
-            assert!(!ptr.is_null());
-            // `*ptr` is uninitialized, and `*ptr = value` would attempt to destroy it
-            // move_val_init moves a value into this memory without
-            // attempting to drop the original value.
-            mem::move_val_init(&mut *ptr, value);
-            Unique{ptr: ptr}
-        }
-    }
-
-    // the 'r lifetime results in the same semantics as `&*x` with ~T
-    pub fn borrow<'r>(&'r self) -> &'r T {
-        unsafe { cast::copy_lifetime(self, &*self.ptr) }
-    }
-
-    // the 'r lifetime results in the same semantics as `&mut *x` with ~T
-    pub fn borrow_mut<'r>(&'r mut self) -> &'r mut T {
-        unsafe { cast::copy_mut_lifetime(self, &mut *self.ptr) }
-    }
-}
-
-// The key ingredient for safety, we associate a destructor with
-// Unique<T>, making the struct manage the raw pointer: when the
-// struct goes out of scope, it will automatically free the raw pointer.
-// NB: This is an unsafe destructor, because rustc will not normally
-// allow destructors to be associated with parametrized types, due to
-// bad interaction with managed boxes. (With the Send restriction,
-// we don't have this problem.)
-#[unsafe_destructor]
-impl<T: Send> Drop for Unique<T> {
-    fn drop(&mut self) {
-        unsafe {
-            let x = mem::uninit(); // dummy value to swap in
-            // We need to move the object out of the box, so that
-            // the destructor is called (at the end of this scope.)
-            ptr::replace(self.ptr, x);
-            free(self.ptr as *mut c_void)
-        }
-    }
-}
-
-// A comparison between the built-in ~ and this reimplementation
-fn main() {
-    {
-        let mut x = ~5;
-        *x = 10;
-    } // `x` is freed here
-
-    {
-        let mut y = Unique::new(5);
-        *y.borrow_mut() = 10;
-    } // `y` is freed here
-}
-~~~~
-
 # Callbacks from C code to Rust functions
 
 Some external libraries require the usage of callbacks to report back their
@@ -263,6 +184,7 @@ to the C library and afterwards be invoked from there.
 A basic example is:
 
 Rust code:
+
 ~~~~ {.ignore}
 extern fn callback(a:i32) {
     println!("I'm called from C with value {0}", a);
@@ -283,7 +205,8 @@ fn main() {
 ~~~~
 
 C code:
-~~~~ {.ignore}
+
+~~~~ {.notrust}
 typedef void (*rust_callback)(int32_t);
 rust_callback cb;
 
@@ -314,6 +237,7 @@ the notification. This will allow the callback to unsafely access the
 referenced Rust object.
 
 Rust code:
+
 ~~~~ {.ignore}
 
 struct RustObject {
@@ -346,7 +270,8 @@ fn main() {
 ~~~~
 
 C code:
-~~~~ {.ignore}
+
+~~~~ {.notrust}
 typedef void (*rust_callback)(int32_t);
 void* cb_target;
 rust_callback cb;

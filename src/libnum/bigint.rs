@@ -19,10 +19,12 @@ A `BigInt` is a combination of `BigUint` and `Sign`.
 use Integer;
 
 use std::cmp;
-use std::cmp::{Eq, Ord, TotalEq, TotalOrd, Ordering, Less, Equal, Greater};
-use std::num::{Zero, One, ToStrRadix, FromStrRadix};
+use std::fmt;
+use std::from_str::FromStr;
+use std::num::CheckedDiv;
 use std::num::{Bitwise, ToPrimitive, FromPrimitive};
-use std::rand::Rng;
+use std::num::{Zero, One, ToStrRadix, FromStrRadix};
+use rand::Rng;
 use std::str;
 use std::uint;
 use std::{i64, u64};
@@ -45,6 +47,7 @@ A `BigDigit` is half the size of machine word size.
 pub type BigDigit = u32;
 
 pub static ZERO_BIG_DIGIT: BigDigit = 0;
+static ZERO_VEC: [BigDigit, ..1] = [ZERO_BIG_DIGIT];
 
 pub mod BigDigit {
     use super::BigDigit;
@@ -84,7 +87,7 @@ A `BigUint`-typed value `BigUint { data: ~[a, b, c] }` represents a number
 */
 #[deriving(Clone)]
 pub struct BigUint {
-    priv data: ~[BigDigit]
+    priv data: Vec<BigDigit>
 }
 
 impl Eq for BigUint {
@@ -113,7 +116,7 @@ impl TotalOrd for BigUint {
         if s_len < o_len { return Less; }
         if s_len > o_len { return Greater;  }
 
-        for (&self_i, &other_i) in self.data.rev_iter().zip(other.data.rev_iter()) {
+        for (&self_i, &other_i) in self.data.iter().rev().zip(other.data.iter().rev()) {
             if self_i < other_i { return Less; }
             if self_i > other_i { return Greater; }
         }
@@ -121,9 +124,10 @@ impl TotalOrd for BigUint {
     }
 }
 
-impl ToStr for BigUint {
-    #[inline]
-    fn to_str(&self) -> ~str { self.to_str_radix(10) }
+impl fmt::Show for BigUint {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f.buf, "{}", self.to_str_radix(10))
+    }
 }
 
 impl FromStr for BigUint {
@@ -137,37 +141,28 @@ impl Num for BigUint {}
 
 impl BitAnd<BigUint, BigUint> for BigUint {
     fn bitand(&self, other: &BigUint) -> BigUint {
-        let new_len = cmp::min(self.data.len(), other.data.len());
-        let anded = vec::from_fn(new_len, |i| {
-            // i will never be less than the size of either data vector
-            let ai = self.data[i];
-            let bi = other.data[i];
-            ai & bi
-        });
-        return BigUint::new(anded);
+        BigUint::new(self.data.iter().zip(other.data.iter()).map(|(ai, bi)| *ai & *bi).collect())
     }
 }
 
 impl BitOr<BigUint, BigUint> for BigUint {
     fn bitor(&self, other: &BigUint) -> BigUint {
-        let new_len = cmp::max(self.data.len(), other.data.len());
-        let ored = vec::from_fn(new_len, |i| {
-            let ai = if i < self.data.len()  { self.data[i]  } else { 0 };
-            let bi = if i < other.data.len() { other.data[i] } else { 0 };
-            ai | bi
-        });
+        let zeros = ZERO_VEC.iter().cycle();
+        let (a, b) = if self.data.len() > other.data.len() { (self, other) } else { (other, self) };
+        let ored = a.data.iter().zip(b.data.iter().chain(zeros)).map(
+            |(ai, bi)| *ai | *bi
+        ).collect();
         return BigUint::new(ored);
     }
 }
 
 impl BitXor<BigUint, BigUint> for BigUint {
     fn bitxor(&self, other: &BigUint) -> BigUint {
-        let new_len = cmp::max(self.data.len(), other.data.len());
-        let xored = vec::from_fn(new_len, |i| {
-            let ai = if i < self.data.len()  { self.data[i]  } else { 0 };
-            let bi = if i < other.data.len() { other.data[i] } else { 0 };
-            ai ^ bi
-        });
+        let zeros = ZERO_VEC.iter().cycle();
+        let (a, b) = if self.data.len() > other.data.len() { (self, other) } else { (other, self) };
+        let xored = a.data.iter().zip(b.data.iter().chain(zeros)).map(
+            |(ai, bi)| *ai ^ *bi
+        ).collect();
         return BigUint::new(xored);
     }
 }
@@ -192,7 +187,7 @@ impl Shr<uint, BigUint> for BigUint {
 
 impl Zero for BigUint {
     #[inline]
-    fn zero() -> BigUint { BigUint::new(~[]) }
+    fn zero() -> BigUint { BigUint::new(Vec::new()) }
 
     #[inline]
     fn is_zero(&self) -> bool { self.data.is_empty() }
@@ -200,25 +195,22 @@ impl Zero for BigUint {
 
 impl One for BigUint {
     #[inline]
-    fn one() -> BigUint { BigUint::new(~[1]) }
+    fn one() -> BigUint { BigUint::new(vec!(1)) }
 }
 
 impl Unsigned for BigUint {}
 
 impl Add<BigUint, BigUint> for BigUint {
     fn add(&self, other: &BigUint) -> BigUint {
-        let new_len = cmp::max(self.data.len(), other.data.len());
+        let zeros = ZERO_VEC.iter().cycle();
+        let (a, b) = if self.data.len() > other.data.len() { (self, other) } else { (other, self) };
 
         let mut carry = 0;
-        let mut sum = vec::from_fn(new_len, |i| {
-            let ai = if i < self.data.len()  { self.data[i]  } else { 0 };
-            let bi = if i < other.data.len() { other.data[i] } else { 0 };
-            let (hi, lo) = BigDigit::from_uint(
-                (ai as uint) + (bi as uint) + (carry as uint)
-            );
+        let mut sum: Vec<BigDigit> =  a.data.iter().zip(b.data.iter().chain(zeros)).map(|(ai, bi)| {
+            let (hi, lo) = BigDigit::from_uint((*ai as uint) + (*bi as uint) + (carry as uint));
             carry = hi;
             lo
-        });
+        }).collect();
         if carry != 0 { sum.push(carry); }
         return BigUint::new(sum);
     }
@@ -227,14 +219,13 @@ impl Add<BigUint, BigUint> for BigUint {
 impl Sub<BigUint, BigUint> for BigUint {
     fn sub(&self, other: &BigUint) -> BigUint {
         let new_len = cmp::max(self.data.len(), other.data.len());
+        let zeros = ZERO_VEC.iter().cycle();
+        let (a, b) = (self.data.iter().chain(zeros.clone()), other.data.iter().chain(zeros));
 
         let mut borrow = 0;
-        let diff = vec::from_fn(new_len, |i| {
-            let ai = if i < self.data.len()  { self.data[i]  } else { 0 };
-            let bi = if i < other.data.len() { other.data[i] } else { 0 };
+        let diff: Vec<BigDigit> =  a.take(new_len).zip(b).map(|(ai, bi)| {
             let (hi, lo) = BigDigit::from_uint(
-                (BigDigit::base) +
-                (ai as uint) - (bi as uint) - (borrow as uint)
+                BigDigit::base + (*ai as uint) - (*bi as uint) - (borrow as uint)
             );
             /*
             hi * (base) + lo == 1*(base) + ai - bi - borrow
@@ -242,7 +233,7 @@ impl Sub<BigUint, BigUint> for BigUint {
             */
             borrow = if hi == 0 { 1 } else { 0 };
             lo
-        });
+        }).collect();
 
         assert_eq!(borrow, 0);     // <=> assert!((self >= other));
         return BigUint::new(diff);
@@ -254,8 +245,8 @@ impl Mul<BigUint, BigUint> for BigUint {
         if self.is_zero() || other.is_zero() { return Zero::zero(); }
 
         let (s_len, o_len) = (self.data.len(), other.data.len());
-        if s_len == 1 { return mul_digit(other, self.data[0]);  }
-        if o_len == 1 { return mul_digit(self,  other.data[0]); }
+        if s_len == 1 { return mul_digit(other, self.data.as_slice()[0]);  }
+        if o_len == 1 { return mul_digit(self,  other.data.as_slice()[0]); }
 
         // Using Karatsuba multiplication
         // (a1 * base + a0) * (b1 * base + b0)
@@ -263,14 +254,14 @@ impl Mul<BigUint, BigUint> for BigUint {
         //   (a1*b1 + a0*b0 - (a1-b0)*(b1-a0)) * base +
         //   a0*b0
         let half_len = cmp::max(s_len, o_len) / 2;
-        let (sHi, sLo) = cut_at(self,  half_len);
-        let (oHi, oLo) = cut_at(other, half_len);
+        let (s_hi, s_lo) = cut_at(self,  half_len);
+        let (o_hi, o_lo) = cut_at(other, half_len);
 
-        let ll = sLo * oLo;
-        let hh = sHi * oHi;
+        let ll = s_lo * o_lo;
+        let hh = s_hi * o_hi;
         let mm = {
-            let (s1, n1) = sub_sign(sHi, sLo);
-            let (s2, n2) = sub_sign(oHi, oLo);
+            let (s1, n1) = sub_sign(s_hi, s_lo);
+            let (s2, n2) = sub_sign(o_hi, o_lo);
             match (s1, s2) {
                 (Equal, _) | (_, Equal) => hh + ll,
                 (Less, Greater) | (Greater, Less) => hh + ll + (n1 * n2),
@@ -286,13 +277,13 @@ impl Mul<BigUint, BigUint> for BigUint {
             if n == 1 { return (*a).clone(); }
 
             let mut carry = 0;
-            let mut prod = a.data.iter().map(|ai| {
+            let mut prod: Vec<BigDigit> = a.data.iter().map(|ai| {
                 let (hi, lo) = BigDigit::from_uint(
                     (*ai as uint) * (n as uint) + (carry as uint)
                 );
                 carry = hi;
                 lo
-            }).collect::<~[BigDigit]>();
+            }).collect();
             if carry != 0 { prod.push(carry); }
             return BigUint::new(prod);
         }
@@ -334,6 +325,40 @@ impl Rem<BigUint, BigUint> for BigUint {
 impl Neg<BigUint> for BigUint {
     #[inline]
     fn neg(&self) -> BigUint { fail!() }
+}
+
+impl CheckedAdd for BigUint {
+    #[inline]
+    fn checked_add(&self, v: &BigUint) -> Option<BigUint> {
+        return Some(self.add(v));
+    }
+}
+
+impl CheckedSub for BigUint {
+    #[inline]
+    fn checked_sub(&self, v: &BigUint) -> Option<BigUint> {
+        if *self < *v {
+            return None;
+        }
+        return Some(self.sub(v));
+    }
+}
+
+impl CheckedMul for BigUint {
+    #[inline]
+    fn checked_mul(&self, v: &BigUint) -> Option<BigUint> {
+        return Some(self.mul(v));
+    }
+}
+
+impl CheckedDiv for BigUint {
+    #[inline]
+    fn checked_div(&self, v: &BigUint) -> Option<BigUint> {
+        if v.is_zero() {
+            return None;
+        }
+        return Some(self.div(v));
+    }
 }
 
 impl Integer for BigUint {
@@ -414,24 +439,25 @@ impl Integer for BigUint {
                 return (Zero::zero(), Zero::zero(), (*a).clone());
             }
 
-            let an = a.data.slice(a.data.len() - n, a.data.len());
+            let an = a.data.tailn(a.data.len() - n);
             let bn = *b.data.last().unwrap();
-            let mut d = ~[];
+            let mut d = Vec::with_capacity(an.len());
             let mut carry = 0;
             for elt in an.rev_iter() {
                 let ai = BigDigit::to_uint(carry, *elt);
                 let di = ai / (bn as uint);
                 assert!(di < BigDigit::base);
                 carry = (ai % (bn as uint)) as BigDigit;
-                d = ~[di as BigDigit] + d;
+                d.push(di as BigDigit)
             }
+            d.reverse();
 
             let shift = (a.data.len() - an.len()) - (b.data.len() - 1);
             if shift == 0 {
                 return (BigUint::new(d), One::one(), (*b).clone());
             }
             let one: BigUint = One::one();
-            return (BigUint::from_slice(d).shl_unit(shift),
+            return (BigUint::new(d).shl_unit(shift),
                     one.shl_unit(shift),
                     b.shl_unit(shift));
         }
@@ -469,10 +495,9 @@ impl Integer for BigUint {
     #[inline]
     fn is_even(&self) -> bool {
         // Considering only the last digit.
-        if self.data.is_empty() {
-            true
-        } else {
-            self.data[0].is_even()
+        match self.data.as_slice().head() {
+            Some(x) => x.is_even(),
+            None => true
         }
     }
 
@@ -499,20 +524,20 @@ impl ToPrimitive for BigUint {
     fn to_u64(&self) -> Option<u64> {
         match self.data.len() {
             0 => Some(0),
-            1 => Some(self.data[0] as u64),
+            1 => Some(self.data.as_slice()[0] as u64),
             2 => {
-                Some(BigDigit::to_uint(self.data[1], self.data[0]) as u64)
+                Some(BigDigit::to_uint(self.data.as_slice()[1], self.data.as_slice()[0]) as u64)
             }
             3 => {
-                let n_lo = BigDigit::to_uint(self.data[1], self.data[0]) as
+                let n_lo = BigDigit::to_uint(self.data.as_slice()[1], self.data.as_slice()[0]) as
                     u64;
-                let n_hi = self.data[2] as u64;
+                let n_hi = self.data.as_slice()[2] as u64;
                 Some((n_hi << 32) + n_lo)
             }
             4 => {
-                let n_lo = BigDigit::to_uint(self.data[1], self.data[0])
+                let n_lo = BigDigit::to_uint(self.data.as_slice()[1], self.data.as_slice()[0])
                     as u64;
-                let n_hi = BigDigit::to_uint(self.data[3], self.data[2])
+                let n_hi = BigDigit::to_uint(self.data.as_slice()[3], self.data.as_slice()[2])
                     as u64;
                 Some((n_hi << 32) + n_lo)
             }
@@ -525,8 +550,8 @@ impl ToPrimitive for BigUint {
     fn to_u64(&self) -> Option<u64> {
         match self.data.len() {
             0 => Some(0),
-            1 => Some(self.data[0] as u64),
-            2 => Some(BigDigit::to_uint(self.data[1], self.data[0]) as u64),
+            1 => Some(self.data.as_slice()[0] as u64),
+            2 => Some(BigDigit::to_uint(self.data.as_slice()[1], self.data.as_slice()[0]) as u64),
             _ => None
         }
     }
@@ -552,10 +577,10 @@ impl FromPrimitive for BigUint {
 
         let n = match (BigDigit::from_uint(n_hi), BigDigit::from_uint(n_lo)) {
             ((0,  0),  (0,  0))  => Zero::zero(),
-            ((0,  0),  (0,  n0)) => BigUint::new(~[n0]),
-            ((0,  0),  (n1, n0)) => BigUint::new(~[n0, n1]),
-            ((0,  n2), (n1, n0)) => BigUint::new(~[n0, n1, n2]),
-            ((n3, n2), (n1, n0)) => BigUint::new(~[n0, n1, n2, n3]),
+            ((0,  0),  (0,  n0)) => BigUint::new(vec!(n0)),
+            ((0,  0),  (n1, n0)) => BigUint::new(vec!(n0, n1)),
+            ((0,  n2), (n1, n0)) => BigUint::new(vec!(n0, n1, n2)),
+            ((n3, n2), (n1, n0)) => BigUint::new(vec!(n0, n1, n2, n3)),
         };
         Some(n)
     }
@@ -565,8 +590,8 @@ impl FromPrimitive for BigUint {
     fn from_u64(n: u64) -> Option<BigUint> {
         let n = match BigDigit::from_uint(n as uint) {
             (0,  0)  => Zero::zero(),
-            (0,  n0) => BigUint::new(~[n0]),
-            (n1, n0) => BigUint::new(~[n0, n1])
+            (0,  n0) => BigUint::new(vec!(n0)),
+            (n1, n0) => BigUint::new(vec!(n0, n1))
         };
         Some(n)
     }
@@ -625,14 +650,14 @@ impl ToStrRadix for BigUint {
         assert!(1 < radix && radix <= 16);
         let (base, max_len) = get_radix_base(radix);
         if base == BigDigit::base {
-            return fill_concat(self.data, radix, max_len)
+            return fill_concat(self.data.as_slice(), radix, max_len)
         }
-        return fill_concat(convert_base((*self).clone(), base), radix, max_len);
+        return fill_concat(convert_base(self, base).as_slice(), radix, max_len);
 
-        fn convert_base(n: BigUint, base: uint) -> ~[BigDigit] {
+        fn convert_base(n: &BigUint, base: uint) -> Vec<BigDigit> {
             let divider    = FromPrimitive::from_uint(base).unwrap();
-            let mut result = ~[];
-            let mut m      = n;
+            let mut result = Vec::new();
+            let mut m      = n.clone();
             while m >= divider {
                 let (d, m0) = m.div_mod_floor(&divider);
                 result.push(m0.to_uint().unwrap() as BigDigit);
@@ -669,7 +694,7 @@ impl FromStrRadix for BigUint {
 impl BigUint {
     /// Creates and initializes a `BigUint`.
     #[inline]
-    pub fn new(v: ~[BigDigit]) -> BigUint {
+    pub fn new(v: Vec<BigDigit>) -> BigUint {
         // omit trailing zeros
         let new_len = v.iter().rposition(|n| *n != 0).map_or(0, |p| p + 1);
 
@@ -682,7 +707,7 @@ impl BigUint {
     /// Creates and initializes a `BigUint`.
     #[inline]
     pub fn from_slice(slice: &[BigDigit]) -> BigUint {
-        return BigUint::new(slice.to_owned());
+        return BigUint::new(Vec::from_slice(slice));
     }
 
     /// Creates and initializes a `BigUint`.
@@ -727,8 +752,8 @@ impl BigUint {
     fn shl_unit(&self, n_unit: uint) -> BigUint {
         if n_unit == 0 || self.is_zero() { return (*self).clone(); }
 
-        return BigUint::new(vec::from_elem(n_unit, ZERO_BIG_DIGIT)
-                            + self.data);
+        return BigUint::new(vec::append(Vec::from_elem(n_unit, ZERO_BIG_DIGIT),
+                                           self.data.as_slice()));
     }
 
     #[inline]
@@ -736,13 +761,13 @@ impl BigUint {
         if n_bits == 0 || self.is_zero() { return (*self).clone(); }
 
         let mut carry = 0;
-        let mut shifted = self.data.iter().map(|elem| {
+        let mut shifted: Vec<BigDigit> = self.data.iter().map(|elem| {
             let (hi, lo) = BigDigit::from_uint(
                 (*elem as uint) << n_bits | (carry as uint)
             );
             carry = hi;
             lo
-        }).collect::<~[BigDigit]>();
+        }).collect();
         if carry != 0 { shifted.push(carry); }
         return BigUint::new(shifted);
     }
@@ -761,8 +786,8 @@ impl BigUint {
         if n_bits == 0 || self.data.is_empty() { return (*self).clone(); }
 
         let mut borrow = 0;
-        let mut shifted_rev = vec::with_capacity(self.data.len());
-        for elem in self.data.rev_iter() {
+        let mut shifted_rev = Vec::with_capacity(self.data.len());
+        for elem in self.data.iter().rev() {
             shifted_rev.push((*elem >> n_bits) | borrow);
             borrow = *elem << (BigDigit::bits - n_bits);
         }
@@ -827,7 +852,7 @@ fn get_radix_base(radix: uint) -> (uint, uint) {
 }
 
 /// A Sign is a `BigInt`'s composing element.
-#[deriving(Eq, Clone)]
+#[deriving(Eq, Clone, Show)]
 pub enum Sign { Minus, Zero, Plus }
 
 impl Ord for Sign {
@@ -904,9 +929,10 @@ impl TotalOrd for BigInt {
     }
 }
 
-impl ToStr for BigInt {
-    #[inline]
-    fn to_str(&self) -> ~str { self.to_str_radix(10) }
+impl fmt::Show for BigInt {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f.buf, "{}", self.to_str_radix(10))
+    }
 }
 
 impl FromStr for BigInt {
@@ -1049,6 +1075,38 @@ impl Neg<BigInt> for BigInt {
         BigInt::from_biguint(self.sign.neg(), self.data.clone())
     }
 }
+
+impl CheckedAdd for BigInt {
+    #[inline]
+    fn checked_add(&self, v: &BigInt) -> Option<BigInt> {
+        return Some(self.add(v));
+    }
+}
+
+impl CheckedSub for BigInt {
+    #[inline]
+    fn checked_sub(&self, v: &BigInt) -> Option<BigInt> {
+        return Some(self.sub(v));
+    }
+}
+
+impl CheckedMul for BigInt {
+    #[inline]
+    fn checked_mul(&self, v: &BigInt) -> Option<BigInt> {
+        return Some(self.mul(v));
+    }
+}
+
+impl CheckedDiv for BigInt {
+    #[inline]
+    fn checked_div(&self, v: &BigInt) -> Option<BigInt> {
+        if v.is_zero() {
+            return None;
+        }
+        return Some(self.div(v));
+    }
+}
+
 
 impl Integer for BigInt {
     #[inline]
@@ -1281,7 +1339,7 @@ pub trait RandBigInt {
 impl<R: Rng> RandBigInt for R {
     fn gen_biguint(&mut self, bit_size: uint) -> BigUint {
         let (digits, rem) = bit_size.div_rem(&BigDigit::bits);
-        let mut data = vec::with_capacity(digits+1);
+        let mut data = Vec::with_capacity(digits+1);
         for _ in range(0, digits) {
             data.push(self.gen());
         }
@@ -1344,7 +1402,7 @@ impl<R: Rng> RandBigInt for R {
 impl BigInt {
     /// Creates and initializes a BigInt.
     #[inline]
-    pub fn new(sign: Sign, v: ~[BigDigit]) -> BigInt {
+    pub fn new(sign: Sign, v: Vec<BigDigit>) -> BigInt {
         BigInt::from_biguint(sign, BigUint::new(v))
     }
 
@@ -1395,18 +1453,18 @@ mod biguint_tests {
     use super::{Plus, BigInt, RandBigInt, ToBigInt};
 
     use std::cmp::{Less, Equal, Greater};
+    use std::from_str::FromStr;
     use std::i64;
-    use std::num::{Zero, One, FromStrRadix};
+    use std::num::{Zero, One, FromStrRadix, ToStrRadix};
     use std::num::{ToPrimitive, FromPrimitive};
-    use std::rand::{task_rng};
-    use std::str;
+    use std::num::CheckedDiv;
+    use rand::{task_rng};
     use std::u64;
-    use std::vec;
 
     #[test]
     fn test_from_slice() {
         fn check(slice: &[BigDigit], data: &[BigDigit]) {
-            assert!(data == BigUint::from_slice(slice).data);
+            assert!(data == BigUint::from_slice(slice).data.as_slice());
         }
         check([1], [1]);
         check([0, 0, 0], []);
@@ -1418,8 +1476,8 @@ mod biguint_tests {
 
     #[test]
     fn test_cmp() {
-        let data: ~[BigUint] = [ &[], &[1], &[2], &[-1], &[0, 1], &[2, 1], &[1, 1, 1]  ]
-            .map(|v| BigUint::from_slice(*v));
+        let data: Vec<BigUint> = [ &[], &[1], &[2], &[-1], &[0, 1], &[2, 1], &[1, 1, 1]  ]
+            .iter().map(|v| BigUint::from_slice(*v)).collect();
         for (i, ni) in data.iter().enumerate() {
             for (j0, nj) in data.slice(i, data.len()).iter().enumerate() {
                 let j = j0 + i;
@@ -1455,44 +1513,44 @@ mod biguint_tests {
 
     #[test]
     fn test_bitand() {
-        fn check(left: ~[BigDigit],
-                 right: ~[BigDigit],
-                 expected: ~[BigDigit]) {
-            assert_eq!(BigUint::new(left) & BigUint::new(right),
-                       BigUint::new(expected));
+        fn check(left: &[BigDigit],
+                 right: &[BigDigit],
+                 expected: &[BigDigit]) {
+            assert_eq!(BigUint::from_slice(left) & BigUint::from_slice(right),
+                       BigUint::from_slice(expected));
         }
-        check(~[], ~[], ~[]);
-        check(~[268, 482, 17],
-              ~[964, 54],
-              ~[260, 34]);
+        check([], [], []);
+        check([268, 482, 17],
+              [964, 54],
+              [260, 34]);
     }
 
     #[test]
     fn test_bitor() {
-        fn check(left: ~[BigDigit],
-                 right: ~[BigDigit],
-                 expected: ~[BigDigit]) {
-            assert_eq!(BigUint::new(left) | BigUint::new(right),
-                       BigUint::new(expected));
+        fn check(left: &[BigDigit],
+                 right: &[BigDigit],
+                 expected: &[BigDigit]) {
+            assert_eq!(BigUint::from_slice(left) | BigUint::from_slice(right),
+                       BigUint::from_slice(expected));
         }
-        check(~[], ~[], ~[]);
-        check(~[268, 482, 17],
-              ~[964, 54],
-              ~[972, 502, 17]);
+        check([], [], []);
+        check([268, 482, 17],
+              [964, 54],
+              [972, 502, 17]);
     }
 
     #[test]
     fn test_bitxor() {
-        fn check(left: ~[BigDigit],
-                 right: ~[BigDigit],
-                 expected: ~[BigDigit]) {
-            assert_eq!(BigUint::new(left) ^ BigUint::new(right),
-                       BigUint::new(expected));
+        fn check(left: &[BigDigit],
+                 right: &[BigDigit],
+                 expected: &[BigDigit]) {
+            assert_eq!(BigUint::from_slice(left) ^ BigUint::from_slice(right),
+                       BigUint::from_slice(expected));
         }
-        check(~[], ~[], ~[]);
-        check(~[268, 482, 17],
-              ~[964, 54],
-              ~[712, 468, 17]);
+        check([], [], []);
+        check([268, 482, 17],
+              [964, 54],
+              [712, 468, 17]);
     }
 
     #[test]
@@ -1585,20 +1643,20 @@ mod biguint_tests {
         check(One::one(), 1);
         check(i64::MAX.to_biguint().unwrap(), i64::MAX);
 
-        check(BigUint::new(~[                   ]), 0);
-        check(BigUint::new(~[ 1                 ]), (1 << (0*BigDigit::bits)));
-        check(BigUint::new(~[-1                 ]), (1 << (1*BigDigit::bits)) - 1);
-        check(BigUint::new(~[ 0,  1             ]), (1 << (1*BigDigit::bits)));
-        check(BigUint::new(~[-1, -1             ]), (1 << (2*BigDigit::bits)) - 1);
-        check(BigUint::new(~[ 0,  0,  1         ]), (1 << (2*BigDigit::bits)));
-        check(BigUint::new(~[-1, -1, -1         ]), (1 << (3*BigDigit::bits)) - 1);
-        check(BigUint::new(~[ 0,  0,  0,  1     ]), (1 << (3*BigDigit::bits)));
-        check(BigUint::new(~[-1, -1, -1, -1 >> 1]), i64::MAX);
+        check(BigUint::new(vec!(                   )), 0);
+        check(BigUint::new(vec!( 1                 )), (1 << (0*BigDigit::bits)));
+        check(BigUint::new(vec!(-1                 )), (1 << (1*BigDigit::bits)) - 1);
+        check(BigUint::new(vec!( 0,  1             )), (1 << (1*BigDigit::bits)));
+        check(BigUint::new(vec!(-1, -1             )), (1 << (2*BigDigit::bits)) - 1);
+        check(BigUint::new(vec!( 0,  0,  1         )), (1 << (2*BigDigit::bits)));
+        check(BigUint::new(vec!(-1, -1, -1         )), (1 << (3*BigDigit::bits)) - 1);
+        check(BigUint::new(vec!( 0,  0,  0,  1     )), (1 << (3*BigDigit::bits)));
+        check(BigUint::new(vec!(-1, -1, -1, -1 >> 1)), i64::MAX);
 
         assert_eq!(i64::MIN.to_biguint(), None);
-        assert_eq!(BigUint::new(~[-1, -1, -1, -1    ]).to_i64(), None);
-        assert_eq!(BigUint::new(~[ 0,  0,  0,  0,  1]).to_i64(), None);
-        assert_eq!(BigUint::new(~[-1, -1, -1, -1, -1]).to_i64(), None);
+        assert_eq!(BigUint::new(vec!(-1, -1, -1, -1    )).to_i64(), None);
+        assert_eq!(BigUint::new(vec!( 0,  0,  0,  0,  1)).to_i64(), None);
+        assert_eq!(BigUint::new(vec!(-1, -1, -1, -1, -1)).to_i64(), None);
     }
 
     #[cfg(target_word_size = "64")]
@@ -1614,16 +1672,16 @@ mod biguint_tests {
         check(One::one(), 1);
         check(i64::MAX.to_biguint().unwrap(), i64::MAX);
 
-        check(BigUint::new(~[           ]), 0);
-        check(BigUint::new(~[ 1         ]), (1 << (0*BigDigit::bits)));
-        check(BigUint::new(~[-1         ]), (1 << (1*BigDigit::bits)) - 1);
-        check(BigUint::new(~[ 0,  1     ]), (1 << (1*BigDigit::bits)));
-        check(BigUint::new(~[-1, -1 >> 1]), i64::MAX);
+        check(BigUint::new(vec!(           )), 0);
+        check(BigUint::new(vec!( 1         )), (1 << (0*BigDigit::bits)));
+        check(BigUint::new(vec!(-1         )), (1 << (1*BigDigit::bits)) - 1);
+        check(BigUint::new(vec!( 0,  1     )), (1 << (1*BigDigit::bits)));
+        check(BigUint::new(vec!(-1, -1 >> 1)), i64::MAX);
 
         assert_eq!(i64::MIN.to_biguint(), None);
-        assert_eq!(BigUint::new(~[-1, -1    ]).to_i64(), None);
-        assert_eq!(BigUint::new(~[ 0,  0,  1]).to_i64(), None);
-        assert_eq!(BigUint::new(~[-1, -1, -1]).to_i64(), None);
+        assert_eq!(BigUint::new(vec!(-1, -1    )).to_i64(), None);
+        assert_eq!(BigUint::new(vec!( 0,  0,  1)).to_i64(), None);
+        assert_eq!(BigUint::new(vec!(-1, -1, -1)).to_i64(), None);
     }
 
     #[cfg(target_word_size = "32")]
@@ -1640,18 +1698,18 @@ mod biguint_tests {
         check(u64::MIN.to_biguint().unwrap(), u64::MIN);
         check(u64::MAX.to_biguint().unwrap(), u64::MAX);
 
-        check(BigUint::new(~[              ]), 0);
-        check(BigUint::new(~[ 1            ]), (1 << (0*BigDigit::bits)));
-        check(BigUint::new(~[-1            ]), (1 << (1*BigDigit::bits)) - 1);
-        check(BigUint::new(~[ 0,  1        ]), (1 << (1*BigDigit::bits)));
-        check(BigUint::new(~[-1, -1        ]), (1 << (2*BigDigit::bits)) - 1);
-        check(BigUint::new(~[ 0,  0,  1    ]), (1 << (2*BigDigit::bits)));
-        check(BigUint::new(~[-1, -1, -1    ]), (1 << (3*BigDigit::bits)) - 1);
-        check(BigUint::new(~[ 0,  0,  0,  1]), (1 << (3*BigDigit::bits)));
-        check(BigUint::new(~[-1, -1, -1, -1]), u64::MAX);
+        check(BigUint::new(vec!(              )), 0);
+        check(BigUint::new(vec!( 1            )), (1 << (0*BigDigit::bits)));
+        check(BigUint::new(vec!(-1            )), (1 << (1*BigDigit::bits)) - 1);
+        check(BigUint::new(vec!( 0,  1        )), (1 << (1*BigDigit::bits)));
+        check(BigUint::new(vec!(-1, -1        )), (1 << (2*BigDigit::bits)) - 1);
+        check(BigUint::new(vec!( 0,  0,  1    )), (1 << (2*BigDigit::bits)));
+        check(BigUint::new(vec!(-1, -1, -1    )), (1 << (3*BigDigit::bits)) - 1);
+        check(BigUint::new(vec!( 0,  0,  0,  1)), (1 << (3*BigDigit::bits)));
+        check(BigUint::new(vec!(-1, -1, -1, -1)), u64::MAX);
 
-        assert_eq!(BigUint::new(~[ 0,  0,  0,  0,  1]).to_u64(), None);
-        assert_eq!(BigUint::new(~[-1, -1, -1, -1, -1]).to_u64(), None);
+        assert_eq!(BigUint::new(vec!( 0,  0,  0,  0,  1)).to_u64(), None);
+        assert_eq!(BigUint::new(vec!(-1, -1, -1, -1, -1)).to_u64(), None);
     }
 
     #[cfg(target_word_size = "64")]
@@ -1668,14 +1726,14 @@ mod biguint_tests {
         check(u64::MIN.to_biguint().unwrap(), u64::MIN);
         check(u64::MAX.to_biguint().unwrap(), u64::MAX);
 
-        check(BigUint::new(~[      ]), 0);
-        check(BigUint::new(~[ 1    ]), (1 << (0*BigDigit::bits)));
-        check(BigUint::new(~[-1    ]), (1 << (1*BigDigit::bits)) - 1);
-        check(BigUint::new(~[ 0,  1]), (1 << (1*BigDigit::bits)));
-        check(BigUint::new(~[-1, -1]), u64::MAX);
+        check(BigUint::new(vec!(      )), 0);
+        check(BigUint::new(vec!( 1    )), (1 << (0*BigDigit::bits)));
+        check(BigUint::new(vec!(-1    )), (1 << (1*BigDigit::bits)) - 1);
+        check(BigUint::new(vec!( 0,  1)), (1 << (1*BigDigit::bits)));
+        check(BigUint::new(vec!(-1, -1)), u64::MAX);
 
-        assert_eq!(BigUint::new(~[ 0,  0,  1]).to_u64(), None);
-        assert_eq!(BigUint::new(~[-1, -1, -1]).to_u64(), None);
+        assert_eq!(BigUint::new(vec!( 0,  0,  1)).to_u64(), None);
+        assert_eq!(BigUint::new(vec!(-1, -1, -1)).to_u64(), None);
     }
 
     #[test]
@@ -1685,8 +1743,8 @@ mod biguint_tests {
             assert_eq!(n.to_bigint().unwrap().to_biguint().unwrap(), n);
         }
         check(Zero::zero(), Zero::zero());
-        check(BigUint::new(~[1,2,3]),
-              BigInt::from_biguint(Plus, BigUint::new(~[1,2,3])));
+        check(BigUint::new(vec!(1,2,3)),
+              BigInt::from_biguint(Plus, BigUint::new(vec!(1,2,3))));
     }
 
     static sum_triples: &'static [(&'static [BigDigit],
@@ -1706,10 +1764,10 @@ mod biguint_tests {
     #[test]
     fn test_add() {
         for elm in sum_triples.iter() {
-            let (aVec, bVec, cVec) = *elm;
-            let a = BigUint::from_slice(aVec);
-            let b = BigUint::from_slice(bVec);
-            let c = BigUint::from_slice(cVec);
+            let (a_vec, b_vec, c_vec) = *elm;
+            let a = BigUint::from_slice(a_vec);
+            let b = BigUint::from_slice(b_vec);
+            let c = BigUint::from_slice(c_vec);
 
             assert!(a + b == c);
             assert!(b + a == c);
@@ -1719,10 +1777,10 @@ mod biguint_tests {
     #[test]
     fn test_sub() {
         for elm in sum_triples.iter() {
-            let (aVec, bVec, cVec) = *elm;
-            let a = BigUint::from_slice(aVec);
-            let b = BigUint::from_slice(bVec);
-            let c = BigUint::from_slice(cVec);
+            let (a_vec, b_vec, c_vec) = *elm;
+            let a = BigUint::from_slice(a_vec);
+            let b = BigUint::from_slice(b_vec);
+            let c = BigUint::from_slice(c_vec);
 
             assert!(c - a == b);
             assert!(c - b == a);
@@ -1770,21 +1828,21 @@ mod biguint_tests {
     #[test]
     fn test_mul() {
         for elm in mul_triples.iter() {
-            let (aVec, bVec, cVec) = *elm;
-            let a = BigUint::from_slice(aVec);
-            let b = BigUint::from_slice(bVec);
-            let c = BigUint::from_slice(cVec);
+            let (a_vec, b_vec, c_vec) = *elm;
+            let a = BigUint::from_slice(a_vec);
+            let b = BigUint::from_slice(b_vec);
+            let c = BigUint::from_slice(c_vec);
 
             assert!(a * b == c);
             assert!(b * a == c);
         }
 
         for elm in div_rem_quadruples.iter() {
-            let (aVec, bVec, cVec, dVec) = *elm;
-            let a = BigUint::from_slice(aVec);
-            let b = BigUint::from_slice(bVec);
-            let c = BigUint::from_slice(cVec);
-            let d = BigUint::from_slice(dVec);
+            let (a_vec, b_vec, c_vec, d_vec) = *elm;
+            let a = BigUint::from_slice(a_vec);
+            let b = BigUint::from_slice(b_vec);
+            let c = BigUint::from_slice(c_vec);
+            let d = BigUint::from_slice(d_vec);
 
             assert!(a == b * c + d);
             assert!(a == c * b + d);
@@ -1794,10 +1852,10 @@ mod biguint_tests {
     #[test]
     fn test_div_rem() {
         for elm in mul_triples.iter() {
-            let (aVec, bVec, cVec) = *elm;
-            let a = BigUint::from_slice(aVec);
-            let b = BigUint::from_slice(bVec);
-            let c = BigUint::from_slice(cVec);
+            let (a_vec, b_vec, c_vec) = *elm;
+            let a = BigUint::from_slice(a_vec);
+            let b = BigUint::from_slice(b_vec);
+            let c = BigUint::from_slice(c_vec);
 
             if !a.is_zero() {
                 assert_eq!(c.div_rem(&a), (b.clone(), Zero::zero()));
@@ -1808,13 +1866,89 @@ mod biguint_tests {
         }
 
         for elm in div_rem_quadruples.iter() {
+            let (a_vec, b_vec, c_vec, d_vec) = *elm;
+            let a = BigUint::from_slice(a_vec);
+            let b = BigUint::from_slice(b_vec);
+            let c = BigUint::from_slice(c_vec);
+            let d = BigUint::from_slice(d_vec);
+
+            if !b.is_zero() { assert!(a.div_rem(&b) == (c, d)); }
+        }
+    }
+
+    #[test]
+    fn test_checked_add() {
+        for elm in sum_triples.iter() {
+            let (aVec, bVec, cVec) = *elm;
+            let a = BigUint::from_slice(aVec);
+            let b = BigUint::from_slice(bVec);
+            let c = BigUint::from_slice(cVec);
+
+            assert!(a.checked_add(&b).unwrap() == c);
+            assert!(b.checked_add(&a).unwrap() == c);
+        }
+    }
+
+    #[test]
+    fn test_checked_sub() {
+        for elm in sum_triples.iter() {
+            let (aVec, bVec, cVec) = *elm;
+            let a = BigUint::from_slice(aVec);
+            let b = BigUint::from_slice(bVec);
+            let c = BigUint::from_slice(cVec);
+
+            assert!(c.checked_sub(&a).unwrap() == b);
+            assert!(c.checked_sub(&b).unwrap() == a);
+
+            if a > c {
+                assert!(a.checked_sub(&c).is_none());
+            }
+            if b > c {
+                assert!(b.checked_sub(&c).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn test_checked_mul() {
+        for elm in mul_triples.iter() {
+            let (aVec, bVec, cVec) = *elm;
+            let a = BigUint::from_slice(aVec);
+            let b = BigUint::from_slice(bVec);
+            let c = BigUint::from_slice(cVec);
+
+            assert!(a.checked_mul(&b).unwrap() == c);
+            assert!(b.checked_mul(&a).unwrap() == c);
+        }
+
+        for elm in div_rem_quadruples.iter() {
             let (aVec, bVec, cVec, dVec) = *elm;
             let a = BigUint::from_slice(aVec);
             let b = BigUint::from_slice(bVec);
             let c = BigUint::from_slice(cVec);
             let d = BigUint::from_slice(dVec);
 
-            if !b.is_zero() { assert!(a.div_rem(&b) == (c, d)); }
+            assert!(a == b.checked_mul(&c).unwrap() + d);
+            assert!(a == c.checked_mul(&b).unwrap() + d);
+        }
+    }
+
+    #[test]
+    fn test_checked_div() {
+        for elm in mul_triples.iter() {
+            let (aVec, bVec, cVec) = *elm;
+            let a = BigUint::from_slice(aVec);
+            let b = BigUint::from_slice(bVec);
+            let c = BigUint::from_slice(cVec);
+
+            if !a.is_zero() {
+                assert!(c.checked_div(&a).unwrap() == b);
+            }
+            if !b.is_zero() {
+                assert!(c.checked_div(&b).unwrap() == a);
+            }
+
+            assert!(c.checked_div(&Zero::zero()).is_none());
         }
     }
 
@@ -1869,11 +2003,11 @@ mod biguint_tests {
         assert!(((one << 64) + one).is_odd());
     }
 
-    fn to_str_pairs() -> ~[ (BigUint, ~[(uint, ~str)]) ] {
+    fn to_str_pairs() -> Vec<(BigUint, Vec<(uint, ~str)>)> {
         let bits = BigDigit::bits;
-        ~[( Zero::zero(), ~[
+        vec!(( Zero::zero(), vec!(
             (2, ~"0"), (3, ~"0")
-        ]), ( BigUint::from_slice([ 0xff ]), ~[
+        )), ( BigUint::from_slice([ 0xff ]), vec!(
             (2,  ~"11111111"),
             (3,  ~"100110"),
             (4,  ~"3333"),
@@ -1889,41 +2023,41 @@ mod biguint_tests {
             (14, ~"143"),
             (15, ~"120"),
             (16, ~"ff")
-        ]), ( BigUint::from_slice([ 0xfff ]), ~[
+        )), ( BigUint::from_slice([ 0xfff ]), vec!(
             (2,  ~"111111111111"),
             (4,  ~"333333"),
             (16, ~"fff")
-        ]), ( BigUint::from_slice([ 1, 2 ]), ~[
+        )), ( BigUint::from_slice([ 1, 2 ]), vec!(
             (2,
              ~"10" +
-             str::from_chars(vec::from_elem(bits - 1, '0')) + "1"),
+             "0".repeat(bits - 1) + "1"),
             (4,
              ~"2" +
-             str::from_chars(vec::from_elem(bits / 2 - 1, '0')) + "1"),
+             "0".repeat(bits / 2 - 1) + "1"),
             (10, match bits {
                 32 => ~"8589934593", 16 => ~"131073", _ => fail!()
             }),
             (16,
              ~"2" +
-             str::from_chars(vec::from_elem(bits / 4 - 1, '0')) + "1")
-        ]), ( BigUint::from_slice([ 1, 2, 3 ]), ~[
+             "0".repeat(bits / 4 - 1) + "1")
+        )), ( BigUint::from_slice([ 1, 2, 3 ]), vec!(
             (2,
              ~"11" +
-             str::from_chars(vec::from_elem(bits - 2, '0')) + "10" +
-             str::from_chars(vec::from_elem(bits - 1, '0')) + "1"),
+             "0".repeat(bits - 2) + "10" +
+             "0".repeat(bits - 1) + "1"),
             (4,
              ~"3" +
-             str::from_chars(vec::from_elem(bits / 2 - 1, '0')) + "2" +
-             str::from_chars(vec::from_elem(bits / 2 - 1, '0')) + "1"),
+             "0".repeat(bits / 2 - 1) + "2" +
+             "0".repeat(bits / 2 - 1) + "1"),
             (10, match bits {
                 32 => ~"55340232229718589441",
                 16 => ~"12885032961",
                 _ => fail!()
             }),
             (16, ~"3" +
-             str::from_chars(vec::from_elem(bits / 4 - 1, '0')) + "2" +
-             str::from_chars(vec::from_elem(bits / 4 - 1, '0')) + "1")
-        ]) ]
+             "0".repeat(bits / 4 - 1) + "2" +
+             "0".repeat(bits / 4 - 1) + "1")
+        )) )
     }
 
     #[test]
@@ -1986,7 +2120,7 @@ mod biguint_tests {
 
     #[test]
     fn test_bits() {
-        assert_eq!(BigUint::new(~[0,0,0,0]).bits(), 0);
+        assert_eq!(BigUint::new(vec!(0,0,0,0)).bits(), 0);
         let n: BigUint = FromPrimitive::from_uint(0).unwrap();
         assert_eq!(n.bits(), 0);
         let n: BigUint = FromPrimitive::from_uint(1).unwrap();
@@ -2054,9 +2188,10 @@ mod bigint_tests {
 
     use std::cmp::{Less, Equal, Greater};
     use std::i64;
-    use std::num::{Zero, One, FromStrRadix};
+    use std::num::CheckedDiv;
+    use std::num::{Zero, One, FromStrRadix, ToStrRadix};
     use std::num::{ToPrimitive, FromPrimitive};
-    use std::rand::{task_rng};
+    use rand::{task_rng};
     use std::u64;
 
     #[test]
@@ -2075,12 +2210,12 @@ mod bigint_tests {
     #[test]
     fn test_cmp() {
         let vs = [ &[2 as BigDigit], &[1, 1], &[2, 1], &[1, 1, 1] ];
-        let mut nums = ~[];
+        let mut nums = Vec::new();
         for s in vs.rev_iter() {
             nums.push(BigInt::from_slice(Minus, *s));
         }
         nums.push(Zero::zero());
-        nums.push_all_move(vs.map(|s| BigInt::from_slice(Plus, *s)));
+        nums.extend(&mut vs.iter().map(|s| BigInt::from_slice(Plus, *s)));
 
         for (i, ni) in nums.iter().enumerate() {
             for (j0, nj) in nums.slice(i, nums.len()).iter().enumerate() {
@@ -2133,15 +2268,15 @@ mod bigint_tests {
             None);
 
         assert_eq!(
-            BigInt::from_biguint(Plus,  BigUint::new(~[1, 2, 3, 4, 5])).to_i64(),
+            BigInt::from_biguint(Plus,  BigUint::new(vec!(1, 2, 3, 4, 5))).to_i64(),
             None);
 
         assert_eq!(
-            BigInt::from_biguint(Minus, BigUint::new(~[1, 0, 0, 1<<(BigDigit::bits-1)])).to_i64(),
+            BigInt::from_biguint(Minus, BigUint::new(vec!(1,0,0,1<<(BigDigit::bits-1)))).to_i64(),
             None);
 
         assert_eq!(
-            BigInt::from_biguint(Minus, BigUint::new(~[1, 2, 3, 4, 5])).to_i64(),
+            BigInt::from_biguint(Minus, BigUint::new(vec!(1, 2, 3, 4, 5))).to_i64(),
             None);
     }
 
@@ -2159,12 +2294,12 @@ mod bigint_tests {
         check(u64::MAX.to_bigint().unwrap(), u64::MAX);
 
         assert_eq!(
-            BigInt::from_biguint(Plus, BigUint::new(~[1, 2, 3, 4, 5])).to_u64(),
+            BigInt::from_biguint(Plus, BigUint::new(vec!(1, 2, 3, 4, 5))).to_u64(),
             None);
 
         let max_value: BigUint = FromPrimitive::from_u64(u64::MAX).unwrap();
         assert_eq!(BigInt::from_biguint(Minus, max_value).to_u64(), None);
-        assert_eq!(BigInt::from_biguint(Minus, BigUint::new(~[1, 2, 3, 4, 5])).to_u64(), None);
+        assert_eq!(BigInt::from_biguint(Minus, BigUint::new(vec!(1, 2, 3, 4, 5))).to_u64(), None);
     }
 
     #[test]
@@ -2176,11 +2311,11 @@ mod bigint_tests {
         let zero: BigInt = Zero::zero();
         let unsigned_zero: BigUint = Zero::zero();
         let positive = BigInt::from_biguint(
-            Plus, BigUint::new(~[1,2,3]));
+            Plus, BigUint::new(vec!(1,2,3)));
         let negative = -positive;
 
         check(zero, unsigned_zero);
-        check(positive, BigUint::new(~[1,2,3]));
+        check(positive, BigUint::new(vec!(1,2,3)));
 
         assert_eq!(negative.to_biguint(), None);
     }
@@ -2202,10 +2337,10 @@ mod bigint_tests {
     #[test]
     fn test_add() {
         for elm in sum_triples.iter() {
-            let (aVec, bVec, cVec) = *elm;
-            let a = BigInt::from_slice(Plus, aVec);
-            let b = BigInt::from_slice(Plus, bVec);
-            let c = BigInt::from_slice(Plus, cVec);
+            let (a_vec, b_vec, c_vec) = *elm;
+            let a = BigInt::from_slice(Plus, a_vec);
+            let b = BigInt::from_slice(Plus, b_vec);
+            let c = BigInt::from_slice(Plus, c_vec);
 
             assert!(a + b == c);
             assert!(b + a == c);
@@ -2221,10 +2356,10 @@ mod bigint_tests {
     #[test]
     fn test_sub() {
         for elm in sum_triples.iter() {
-            let (aVec, bVec, cVec) = *elm;
-            let a = BigInt::from_slice(Plus, aVec);
-            let b = BigInt::from_slice(Plus, bVec);
-            let c = BigInt::from_slice(Plus, cVec);
+            let (a_vec, b_vec, c_vec) = *elm;
+            let a = BigInt::from_slice(Plus, a_vec);
+            let b = BigInt::from_slice(Plus, b_vec);
+            let c = BigInt::from_slice(Plus, c_vec);
 
             assert!(c - a == b);
             assert!(c - b == a);
@@ -2278,10 +2413,10 @@ mod bigint_tests {
     #[test]
     fn test_mul() {
         for elm in mul_triples.iter() {
-            let (aVec, bVec, cVec) = *elm;
-            let a = BigInt::from_slice(Plus, aVec);
-            let b = BigInt::from_slice(Plus, bVec);
-            let c = BigInt::from_slice(Plus, cVec);
+            let (a_vec, b_vec, c_vec) = *elm;
+            let a = BigInt::from_slice(Plus, a_vec);
+            let b = BigInt::from_slice(Plus, b_vec);
+            let c = BigInt::from_slice(Plus, c_vec);
 
             assert!(a * b == c);
             assert!(b * a == c);
@@ -2291,11 +2426,11 @@ mod bigint_tests {
         }
 
         for elm in div_rem_quadruples.iter() {
-            let (aVec, bVec, cVec, dVec) = *elm;
-            let a = BigInt::from_slice(Plus, aVec);
-            let b = BigInt::from_slice(Plus, bVec);
-            let c = BigInt::from_slice(Plus, cVec);
-            let d = BigInt::from_slice(Plus, dVec);
+            let (a_vec, b_vec, c_vec, d_vec) = *elm;
+            let a = BigInt::from_slice(Plus, a_vec);
+            let b = BigInt::from_slice(Plus, b_vec);
+            let c = BigInt::from_slice(Plus, c_vec);
+            let d = BigInt::from_slice(Plus, d_vec);
 
             assert!(a == b * c + d);
             assert!(a == c * b + d);
@@ -2330,21 +2465,21 @@ mod bigint_tests {
         }
 
         for elm in mul_triples.iter() {
-            let (aVec, bVec, cVec) = *elm;
-            let a = BigInt::from_slice(Plus, aVec);
-            let b = BigInt::from_slice(Plus, bVec);
-            let c = BigInt::from_slice(Plus, cVec);
+            let (a_vec, b_vec, c_vec) = *elm;
+            let a = BigInt::from_slice(Plus, a_vec);
+            let b = BigInt::from_slice(Plus, b_vec);
+            let c = BigInt::from_slice(Plus, c_vec);
 
             if !a.is_zero() { check(&c, &a, &b, &Zero::zero()); }
             if !b.is_zero() { check(&c, &b, &a, &Zero::zero()); }
         }
 
         for elm in div_rem_quadruples.iter() {
-            let (aVec, bVec, cVec, dVec) = *elm;
-            let a = BigInt::from_slice(Plus, aVec);
-            let b = BigInt::from_slice(Plus, bVec);
-            let c = BigInt::from_slice(Plus, cVec);
-            let d = BigInt::from_slice(Plus, dVec);
+            let (a_vec, b_vec, c_vec, d_vec) = *elm;
+            let a = BigInt::from_slice(Plus, a_vec);
+            let b = BigInt::from_slice(Plus, b_vec);
+            let c = BigInt::from_slice(Plus, c_vec);
+            let d = BigInt::from_slice(Plus, d_vec);
 
             if !b.is_zero() {
                 check(&a, &b, &c, &d);
@@ -2373,13 +2508,79 @@ mod bigint_tests {
             check_sub(&a.neg(), &b.neg(), q, &r.neg());
         }
         for elm in mul_triples.iter() {
+            let (a_vec, b_vec, c_vec) = *elm;
+            let a = BigInt::from_slice(Plus, a_vec);
+            let b = BigInt::from_slice(Plus, b_vec);
+            let c = BigInt::from_slice(Plus, c_vec);
+
+            if !a.is_zero() { check(&c, &a, &b, &Zero::zero()); }
+            if !b.is_zero() { check(&c, &b, &a, &Zero::zero()); }
+        }
+
+        for elm in div_rem_quadruples.iter() {
+            let (a_vec, b_vec, c_vec, d_vec) = *elm;
+            let a = BigInt::from_slice(Plus, a_vec);
+            let b = BigInt::from_slice(Plus, b_vec);
+            let c = BigInt::from_slice(Plus, c_vec);
+            let d = BigInt::from_slice(Plus, d_vec);
+
+            if !b.is_zero() {
+                check(&a, &b, &c, &d);
+            }
+        }
+    }
+
+    #[test]
+    fn test_checked_add() {
+        for elm in sum_triples.iter() {
             let (aVec, bVec, cVec) = *elm;
             let a = BigInt::from_slice(Plus, aVec);
             let b = BigInt::from_slice(Plus, bVec);
             let c = BigInt::from_slice(Plus, cVec);
 
-            if !a.is_zero() { check(&c, &a, &b, &Zero::zero()); }
-            if !b.is_zero() { check(&c, &b, &a, &Zero::zero()); }
+            assert!(a.checked_add(&b).unwrap() == c);
+            assert!(b.checked_add(&a).unwrap() == c);
+            assert!(c.checked_add(&(-a)).unwrap() == b);
+            assert!(c.checked_add(&(-b)).unwrap() == a);
+            assert!(a.checked_add(&(-c)).unwrap() == (-b));
+            assert!(b.checked_add(&(-c)).unwrap() == (-a));
+            assert!((-a).checked_add(&(-b)).unwrap() == (-c))
+            assert!(a.checked_add(&(-a)).unwrap() == Zero::zero());
+        }
+    }
+
+    #[test]
+    fn test_checked_sub() {
+        for elm in sum_triples.iter() {
+            let (aVec, bVec, cVec) = *elm;
+            let a = BigInt::from_slice(Plus, aVec);
+            let b = BigInt::from_slice(Plus, bVec);
+            let c = BigInt::from_slice(Plus, cVec);
+
+            assert!(c.checked_sub(&a).unwrap() == b);
+            assert!(c.checked_sub(&b).unwrap() == a);
+            assert!((-b).checked_sub(&a).unwrap() == (-c))
+            assert!((-a).checked_sub(&b).unwrap() == (-c))
+            assert!(b.checked_sub(&(-a)).unwrap() == c);
+            assert!(a.checked_sub(&(-b)).unwrap() == c);
+            assert!((-c).checked_sub(&(-a)).unwrap() == (-b));
+            assert!(a.checked_sub(&a).unwrap() == Zero::zero());
+        }
+    }
+
+    #[test]
+    fn test_checked_mul() {
+        for elm in mul_triples.iter() {
+            let (aVec, bVec, cVec) = *elm;
+            let a = BigInt::from_slice(Plus, aVec);
+            let b = BigInt::from_slice(Plus, bVec);
+            let c = BigInt::from_slice(Plus, cVec);
+
+            assert!(a.checked_mul(&b).unwrap() == c);
+            assert!(b.checked_mul(&a).unwrap() == c);
+
+            assert!((-a).checked_mul(&b).unwrap() == -c);
+            assert!((-b).checked_mul(&a).unwrap() == -c);
         }
 
         for elm in div_rem_quadruples.iter() {
@@ -2389,9 +2590,31 @@ mod bigint_tests {
             let c = BigInt::from_slice(Plus, cVec);
             let d = BigInt::from_slice(Plus, dVec);
 
-            if !b.is_zero() {
-                check(&a, &b, &c, &d);
+            assert!(a == b.checked_mul(&c).unwrap() + d);
+            assert!(a == c.checked_mul(&b).unwrap() + d);
+        }
+    }
+    #[test]
+    fn test_checked_div() {
+        for elm in mul_triples.iter() {
+            let (aVec, bVec, cVec) = *elm;
+            let a = BigInt::from_slice(Plus, aVec);
+            let b = BigInt::from_slice(Plus, bVec);
+            let c = BigInt::from_slice(Plus, cVec);
+
+            if !a.is_zero() {
+                assert!(c.checked_div(&a).unwrap() == b);
+                assert!((-c).checked_div(&(-a)).unwrap() == b);
+                assert!((-c).checked_div(&a).unwrap() == -b);
             }
+            if !b.is_zero() {
+                assert!(c.checked_div(&b).unwrap() == a);
+                assert!((-c).checked_div(&(-b)).unwrap() == a);
+                assert!((-c).checked_div(&b).unwrap() == -a);
+            }
+
+            assert!(c.checked_div(&Zero::zero()).is_none());
+            assert!((-c).checked_div(&Zero::zero()).is_none());
         }
     }
 
@@ -2490,10 +2713,10 @@ mod bigint_tests {
 
     #[test]
     fn test_neg() {
-        assert!(-BigInt::new(Plus,  ~[1, 1, 1]) ==
-            BigInt::new(Minus, ~[1, 1, 1]));
-        assert!(-BigInt::new(Minus, ~[1, 1, 1]) ==
-            BigInt::new(Plus,  ~[1, 1, 1]));
+        assert!(-BigInt::new(Plus,  vec!(1, 1, 1)) ==
+            BigInt::new(Minus, vec!(1, 1, 1)));
+        assert!(-BigInt::new(Minus, vec!(1, 1, 1)) ==
+            BigInt::new(Plus,  vec!(1, 1, 1)));
         let zero: BigInt = Zero::zero();
         assert_eq!(-zero, zero);
     }

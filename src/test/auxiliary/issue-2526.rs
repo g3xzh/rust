@@ -11,24 +11,22 @@
 #[crate_id="issue_2526#0.2"];
 #[crate_type = "lib"];
 
-extern crate extra;
-
 struct arc_destruct<T> {
   _data: int,
 }
 
 #[unsafe_destructor]
-impl<T:Freeze> Drop for arc_destruct<T> {
+impl<T: Share> Drop for arc_destruct<T> {
     fn drop(&mut self) {}
 }
 
-fn arc_destruct<T:Freeze>(data: int) -> arc_destruct<T> {
+fn arc_destruct<T: Share>(data: int) -> arc_destruct<T> {
     arc_destruct {
         _data: data
     }
 }
 
-fn arc<T:Freeze>(_data: T) -> arc_destruct<T> {
+fn arc<T: Share>(_data: T) -> arc_destruct<T> {
     arc_destruct(0)
 }
 

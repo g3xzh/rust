@@ -23,10 +23,10 @@ use middle::moves;
 use middle::pat_util;
 use middle::ty::{ty_region};
 use middle::ty;
+use middle::typeck::MethodCall;
 use util::common::indenter;
 use util::ppaux::{Repr};
 
-use std::cell::RefCell;
 use syntax::ast;
 use syntax::ast_util;
 use syntax::ast_util::IdRange;
@@ -67,13 +67,12 @@ mod gather_moves;
 /// body of the while loop and we will refuse to root the pointer `&*x`
 /// because it would have to be rooted for a region greater than `root_ub`.
 struct GatherLoanCtxt<'a> {
-    bccx: &'a BorrowckCtxt,
+    bccx: &'a BorrowckCtxt<'a>,
     id_range: IdRange,
     move_data: move_data::MoveData,
-    all_loans: @RefCell<~[Loan]>,
+    all_loans: Vec<Loan>,
     item_ub: ast::NodeId,
-    repeating_ids: ~[ast::NodeId]
-}
+    repeating_ids: Vec<ast::NodeId> }
 
 impl<'a> visit::Visitor<()> for GatherLoanCtxt<'a> {
     fn visit_expr(&mut self, ex: &Expr, _: ()) {
@@ -82,10 +81,12 @@ impl<'a> visit::Visitor<()> for GatherLoanCtxt<'a> {
     fn visit_block(&mut self, b: &Block, _: ()) {
         gather_loans_in_block(self, b);
     }
-    fn visit_fn(&mut self, fk: &FnKind, fd: &FnDecl, b: &Block,
-                s: Span, n: NodeId, _: ()) {
-        gather_loans_in_fn(self, fk, fd, b, s, n);
-    }
+
+    /// Do not visit closures or fn items here, the outer loop in
+    /// borrowck/mod will visit them for us in turn.
+    fn visit_fn(&mut self, _: &FnKind, _: &FnDecl, _: &Block,
+                _: Span, _: NodeId, _: ()) {}
+
     fn visit_stmt(&mut self, s: &Stmt, _: ()) {
         visit::walk_stmt(self, s, ());
     }
@@ -99,23 +100,7 @@ impl<'a> visit::Visitor<()> for GatherLoanCtxt<'a> {
     // #7740: Do not visit items here, not even fn items nor methods
     // of impl items; the outer loop in borrowck/mod will visit them
     // for us in turn.  Thus override visit_item's walk with a no-op.
-    fn visit_item(&mut self, _: &ast::Item, _: ()) { }
-}
-
-pub fn gather_loans(bccx: &BorrowckCtxt, decl: &ast::FnDecl, body: &ast::Block)
-                    -> (IdRange, @RefCell<~[Loan]>, move_data::MoveData) {
-    let mut glcx = GatherLoanCtxt {
-        bccx: bccx,
-        id_range: IdRange::max(),
-        all_loans: @RefCell::new(~[]),
-        item_ub: body.id,
-        repeating_ids: ~[body.id],
-        move_data: MoveData::new()
-    };
-    glcx.gather_fn_arg_patterns(decl, body);
-
-    glcx.visit_block(body, ());
-    return (glcx.id_range, glcx.all_loans, glcx.move_data);
+    fn visit_item(&mut self, _: &ast::Item, _: ()) {}
 }
 
 fn add_pat_to_id_range(this: &mut GatherLoanCtxt,
@@ -128,15 +113,21 @@ fn add_pat_to_id_range(this: &mut GatherLoanCtxt,
     visit::walk_pat(this, p, ());
 }
 
-fn gather_loans_in_fn(_v: &mut GatherLoanCtxt,
-                      _fk: &FnKind,
-                      _decl: &ast::FnDecl,
-                      _body: &ast::Block,
-                      _sp: Span,
-                      _id: ast::NodeId) {
-    // Do not visit closures or fn items here, the outer loop in
-    // borrowck/mod will visit them for us in turn.
-    return;
+pub fn gather_loans_in_fn(bccx: &BorrowckCtxt, decl: &ast::FnDecl, body: &ast::Block)
+                    -> (IdRange, Vec<Loan>, move_data::MoveData) {
+    let mut glcx = GatherLoanCtxt {
+        bccx: bccx,
+        id_range: IdRange::max(),
+        all_loans: Vec::new(),
+        item_ub: body.id,
+        repeating_ids: vec!(body.id),
+        move_data: MoveData::new()
+    };
+    glcx.gather_fn_arg_patterns(decl, body);
+
+    glcx.visit_block(body, ());
+    let GatherLoanCtxt { id_range, all_loans, move_data, .. } = glcx;
+    (id_range, all_loans, move_data)
 }
 
 fn gather_loans_in_block(this: &mut GatherLoanCtxt,
@@ -160,16 +151,8 @@ fn gather_loans_in_local(this: &mut GatherLoanCtxt,
             })
         }
         Some(init) => {
-            // Variable declarations with initializers are considered "assigns":
-            let tcx = this.bccx.tcx;
-            pat_util::pat_bindings(tcx.def_map, local.pat, |_, id, span, _| {
-                gather_moves::gather_assignment(this.bccx,
-                                                &this.move_data,
-                                                id,
-                                                span,
-                                                @LpVar(id),
-                                                id);
-            });
+            // Variable declarations with initializers are considered "assigns",
+            // which is handled by `gather_pat`:
             let init_cmt = this.bccx.cat_expr(init);
             this.gather_pat(init_cmt, local.pat, None);
         }
@@ -178,6 +161,28 @@ fn gather_loans_in_local(this: &mut GatherLoanCtxt,
     visit::walk_local(this, local, ());
 }
 
+pub fn gather_loans_in_static_initializer(bccx: &mut BorrowckCtxt, expr: &ast::Expr) {
+
+    debug!("gather_loans_in_item(expr={})", expr.repr(bccx.tcx));
+
+    let mut glcx = GatherLoanCtxt {
+        bccx: bccx,
+        id_range: IdRange::max(),
+        all_loans: Vec::new(),
+        item_ub: expr.id,
+        repeating_ids: vec!(expr.id),
+        move_data: MoveData::new()
+    };
+
+    // FIXME #13005 This should also walk the
+    // expression.
+    match expr.node {
+        ast::ExprAddrOf(..) => {
+            glcx.visit_expr(expr, ());
+        }
+        _ => {}
+    }
+}
 
 fn gather_loans_in_expr(this: &mut GatherLoanCtxt,
                         ex: &ast::Expr) {
@@ -189,20 +194,9 @@ fn gather_loans_in_expr(this: &mut GatherLoanCtxt,
 
     this.id_range.add(ex.id);
 
-    {
-        let r = ex.get_callee_id();
-        for callee_id in r.iter() {
-            this.id_range.add(*callee_id);
-        }
-    }
-
     // If this expression is borrowed, have to ensure it remains valid:
-    {
-        let adjustments = tcx.adjustments.borrow();
-        let r = adjustments.get().find(&ex.id);
-        for &adjustments in r.iter() {
-            this.guarantee_adjustments(ex, *adjustments);
-        }
+    for &adjustments in tcx.adjustments.borrow().get().find(&ex.id).iter() {
+        this.guarantee_adjustments(ex, *adjustments);
     }
 
     // If this expression is a move, gather it:
@@ -233,20 +227,19 @@ fn gather_loans_in_expr(this: &mut GatherLoanCtxt,
         visit::walk_expr(this, ex, ());
       }
 
-      ast::ExprAssign(l, _) | ast::ExprAssignOp(_, _, l, _) => {
-          let l_cmt = this.bccx.cat_expr(l);
-          match opt_loan_path(l_cmt) {
-              Some(l_lp) => {
-                  gather_moves::gather_assignment(this.bccx, &this.move_data,
-                                                  ex.id, ex.span,
-                                                  l_lp, l.id);
-              }
-              None => {
-                  // This can occur with e.g. `*foo() = 5`.  In such
-                  // cases, there is no need to check for conflicts
-                  // with moves etc, just ignore.
-              }
-          }
+      ast::ExprAssign(l, _) => {
+          with_assignee_loan_path(
+              this.bccx, l,
+              |lp| gather_moves::gather_assignment(this.bccx, &this.move_data,
+                                                   ex.id, ex.span, lp, l.id));
+          visit::walk_expr(this, ex, ());
+      }
+
+      ast::ExprAssignOp(_, l, _) => {
+          with_assignee_loan_path(
+              this.bccx, l,
+              |lp| gather_moves::gather_move_and_assignment(this.bccx, &this.move_data,
+                                                            ex.id, ex.span, lp, l.id));
           visit::walk_expr(this, ex, ());
       }
 
@@ -260,9 +253,9 @@ fn gather_loans_in_expr(this: &mut GatherLoanCtxt,
         visit::walk_expr(this, ex, ());
       }
 
-      ast::ExprIndex(_, _, arg) |
-      ast::ExprBinary(_, _, _, arg)
-      if method_map.get().contains_key(&ex.id) => {
+      ast::ExprIndex(_, arg) |
+      ast::ExprBinary(_, _, arg)
+      if method_map.get().contains_key(&MethodCall::expr(ex.id)) => {
           // Arguments in method calls are always passed by ref.
           //
           // Currently these do not use adjustments, so we have to
@@ -307,17 +300,10 @@ fn gather_loans_in_expr(this: &mut GatherLoanCtxt,
 
       ast::ExprInlineAsm(ref ia) => {
           for &(_, out) in ia.outputs.iter() {
-              let out_cmt = this.bccx.cat_expr(out);
-              match opt_loan_path(out_cmt) {
-                  Some(out_lp) => {
-                      gather_moves::gather_assignment(this.bccx, &this.move_data,
-                                                      ex.id, ex.span,
-                                                      out_lp, out.id);
-                  }
-                  None => {
-                      // See the comment for ExprAssign.
-                  }
-              }
+              with_assignee_loan_path(
+                  this.bccx, out,
+                  |lp| gather_moves::gather_assignment(this.bccx, &this.move_data,
+                                                       ex.id, ex.span, lp, out.id));
           }
           visit::walk_expr(this, ex, ());
       }
@@ -328,8 +314,20 @@ fn gather_loans_in_expr(this: &mut GatherLoanCtxt,
     }
 }
 
+fn with_assignee_loan_path(bccx: &BorrowckCtxt, expr: &ast::Expr, op: |@LoanPath|) {
+    let cmt = bccx.cat_expr(expr);
+    match opt_loan_path(cmt) {
+        Some(lp) => op(lp),
+        None => {
+            // This can occur with e.g. `*foo() = 5`.  In such
+            // cases, there is no need to check for conflicts
+            // with moves etc, just ignore.
+        }
+    }
+}
+
 impl<'a> GatherLoanCtxt<'a> {
-    pub fn tcx(&self) -> ty::ctxt { self.bccx.tcx }
+    pub fn tcx(&self) -> &'a ty::ctxt { self.bccx.tcx }
 
     pub fn push_repeating_id(&mut self, id: ast::NodeId) {
         self.repeating_ids.push(id);
@@ -338,6 +336,39 @@ impl<'a> GatherLoanCtxt<'a> {
     pub fn pop_repeating_id(&mut self, id: ast::NodeId) {
         let popped = self.repeating_ids.pop().unwrap();
         assert_eq!(id, popped);
+    }
+
+    pub fn guarantee_autoderefs(&mut self,
+                                expr: &ast::Expr,
+                                autoderefs: uint) {
+        let method_map = self.bccx.method_map.borrow();
+        for i in range(0, autoderefs) {
+            match method_map.get().find(&MethodCall::autoderef(expr.id, i as u32)) {
+                Some(method) => {
+                    // Treat overloaded autoderefs as if an AutoRef adjustment
+                    // was applied on the base type, as that is always the case.
+                    let mut mc = self.bccx.mc();
+                    let cmt = match mc.cat_expr_autoderefd(expr, i) {
+                        Ok(v) => v,
+                        Err(()) => self.tcx().sess.span_bug(expr.span, "Err from mc")
+                    };
+                    let self_ty = *ty::ty_fn_args(method.ty).get(0);
+                    let (m, r) = match ty::get(self_ty).sty {
+                        ty::ty_rptr(r, ref m) => (m.mutbl, r),
+                        _ => self.tcx().sess.span_bug(expr.span,
+                                format!("bad overloaded deref type {}",
+                                    method.ty.repr(self.tcx())))
+                    };
+                    self.guarantee_valid(expr.id,
+                                         expr.span,
+                                         cmt,
+                                         m,
+                                         r,
+                                         AutoRef);
+                }
+                None => {}
+            }
+        }
     }
 
     pub fn guarantee_adjustments(&mut self,
@@ -355,15 +386,17 @@ impl<'a> GatherLoanCtxt<'a> {
 
             ty::AutoDerefRef(
                 ty::AutoDerefRef {
-                    autoref: None, .. }) => {
+                    autoref: None, autoderefs }) => {
                 debug!("no autoref");
+                self.guarantee_autoderefs(expr, autoderefs);
                 return;
             }
 
             ty::AutoDerefRef(
                 ty::AutoDerefRef {
                     autoref: Some(ref autoref),
-                    autoderefs: autoderefs}) => {
+                    autoderefs}) => {
+                self.guarantee_autoderefs(expr, autoderefs);
                 let mut mc = self.bccx.mc();
                 let cmt = match mc.cat_expr_autoderefd(expr, autoderefs) {
                     Ok(v) => v,
@@ -419,9 +452,7 @@ impl<'a> GatherLoanCtxt<'a> {
 
     fn guarantee_captures(&mut self,
                           closure_expr: &ast::Expr) {
-        let capture_map = self.bccx.capture_map.borrow();
-        let captured_vars = capture_map.get().get(&closure_expr.id);
-        for captured_var in captured_vars.borrow().iter() {
+        for captured_var in self.bccx.capture_map.get(&closure_expr.id).deref().iter() {
             match captured_var.mode {
                 moves::CapCopy | moves::CapMove => { continue; }
                 moves::CapRef => { }
@@ -563,9 +594,8 @@ impl<'a> GatherLoanCtxt<'a> {
                     self.mark_loan_path_as_mutated(loan_path);
                 }
 
-                let all_loans = self.all_loans.borrow();
                 Loan {
-                    index: all_loans.get().len(),
+                    index: self.all_loans.len(),
                     loan_path: loan_path,
                     cmt: cmt,
                     kind: req_kind,
@@ -584,10 +614,7 @@ impl<'a> GatherLoanCtxt<'a> {
         // let loan_path = loan.loan_path;
         // let loan_gen_scope = loan.gen_scope;
         // let loan_kill_scope = loan.kill_scope;
-        {
-            let mut all_loans = self.all_loans.borrow_mut();
-            all_loans.get().push(loan);
-        }
+        self.all_loans.push(loan);
 
         // if loan_gen_scope != borrow_id {
             // FIXME(#6268) Nested method calls
@@ -658,34 +685,45 @@ impl<'a> GatherLoanCtxt<'a> {
                               -> Result<(),()> {
             //! Implements the A-* rules in doc.rs.
 
-            match req_kind {
-                ty::ImmBorrow => {
+            match (cmt.freely_aliasable(bccx.tcx), req_kind) {
+                (None, _) => {
+                    /* Uniquely accessible path -- OK for `&` and `&mut` */
                     Ok(())
                 }
-
-                ty::UniqueImmBorrow | ty::MutBorrow => {
-                    // Check for those cases where we cannot control
-                    // the aliasing and make sure that we are not
-                    // being asked to.
-                    match cmt.freely_aliasable() {
-                        None => {
+                (Some(mc::AliasableStatic(safety)), ty::ImmBorrow) => {
+                    // Borrow of an immutable static item:
+                    match safety {
+                        mc::InteriorUnsafe => {
+                            // If the static item contains an Unsafe<T>, it has interior mutability.
+                            // In such cases, we cannot permit it to be borrowed, because the
+                            // static item resides in immutable memory and mutating it would
+                            // cause segfaults.
+                            bccx.tcx.sess.span_err(borrow_span,
+                                                   format!("borrow of immutable static items with \
+                                                            unsafe interior is not allowed"));
+                            Err(())
+                        }
+                        mc::InteriorSafe => {
+                            // Immutable static can be borrowed, no problem.
                             Ok(())
                         }
-                        Some(mc::AliasableStaticMut) => {
-                            // This is nasty, but we ignore the
-                            // aliasing rules if the data is based in
-                            // a `static mut`, since those are always
-                            // unsafe. At your own peril and all that.
-                            Ok(())
-                        }
-                        Some(alias_cause) => {
-                            bccx.report_aliasability_violation(
+                    }
+                }
+                (Some(mc::AliasableStaticMut(..)), _) => {
+                    // Even touching a static mut is considered unsafe. We assume the
+                    // user knows what they're doing in these cases.
+                    Ok(())
+                }
+                (Some(alias_cause), ty::UniqueImmBorrow) |
+                (Some(alias_cause), ty::MutBorrow) => {
+                    bccx.report_aliasability_violation(
                                 borrow_span,
                                 BorrowViolation(loan_cause),
                                 alias_cause);
-                            Err(())
-                        }
-                    }
+                    Err(())
+                }
+                (_, _) => {
+                    Ok(())
                 }
             }
         }
@@ -811,6 +849,17 @@ impl<'a> GatherLoanCtxt<'a> {
         self.bccx.cat_pattern(discr_cmt, root_pat, |cmt, pat| {
             match pat.node {
               ast::PatIdent(bm, _, _) if self.pat_is_binding(pat) => {
+                // Each match binding is effectively an assignment.
+                let tcx = self.bccx.tcx;
+                pat_util::pat_bindings(tcx.def_map, pat, |_, id, span, _| {
+                    gather_moves::gather_assignment(self.bccx,
+                                                    &self.move_data,
+                                                    id,
+                                                    span,
+                                                    @LpVar(id),
+                                                    id);
+                });
+
                 match bm {
                   ast::BindByRef(mutbl) => {
                     // ref x or ref x @ p --- creates a ptr which must

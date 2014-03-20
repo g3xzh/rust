@@ -63,13 +63,14 @@ use util::common::indent;
 use util::ppaux::Repr;
 
 use std::result;
+
 use syntax::ast::{Onceness, Purity};
 use syntax::ast;
 use syntax::opt_vec;
 use syntax::abi::AbiSet;
 
 pub trait Combine {
-    fn infcx<'a>(&'a self) -> &'a InferCtxt;
+    fn infcx<'a>(&'a self) -> &'a InferCtxt<'a>;
     fn tag(&self) -> ~str;
     fn a_is_expected(&self) -> bool;
     fn trace(&self) -> TypeTrace;
@@ -82,7 +83,7 @@ pub trait Combine {
     fn contratys(&self, a: ty::t, b: ty::t) -> cres<ty::t>;
     fn tys(&self, a: ty::t, b: ty::t) -> cres<ty::t>;
 
-    fn tps(&self, as_: &[ty::t], bs: &[ty::t]) -> cres<~[ty::t]> {
+    fn tps(&self, as_: &[ty::t], bs: &[ty::t]) -> cres<Vec<ty::t> > {
 
         // Note: type parameters are always treated as *invariant*
         // (otherwise the type system would be unsound).  In the
@@ -92,7 +93,7 @@ pub trait Combine {
         if as_.len() == bs.len() {
             result::fold_(as_.iter().zip(bs.iter())
                           .map(|(a, b)| eq_tys(self, *a, *b)))
-                .then(|| Ok(as_.to_owned()))
+                .then(|| Ok(Vec::from_slice(as_)))
         } else {
             Err(ty::terr_ty_param_size(expected_found(self,
                                                       as_.len(),
@@ -180,7 +181,7 @@ pub trait Combine {
             }
         }
 
-        let tps = if_ok!(self.tps(as_.tps, bs.tps));
+        let tps = if_ok!(self.tps(as_.tps.as_slice(), bs.tps.as_slice()));
         let self_ty = if_ok!(self.self_tys(as_.self_ty, bs.self_ty));
         let regions = if_ok!(relate_region_params(self,
                                                   item_def_id,
@@ -330,7 +331,7 @@ pub trait Combine {
 }
 
 pub struct CombineFields<'a> {
-    infcx: &'a InferCtxt,
+    infcx: &'a InferCtxt<'a>,
     a_is_expected: bool,
     trace: TypeTrace,
 }
@@ -396,7 +397,7 @@ pub fn eq_opt_regions<C:Combine>(
 
 pub fn super_fn_sigs<C:Combine>(this: &C, a: &ty::FnSig, b: &ty::FnSig) -> cres<ty::FnSig> {
 
-    fn argvecs<C:Combine>(this: &C, a_args: &[ty::t], b_args: &[ty::t]) -> cres<~[ty::t]> {
+    fn argvecs<C:Combine>(this: &C, a_args: &[ty::t], b_args: &[ty::t]) -> cres<Vec<ty::t> > {
         if a_args.len() == b_args.len() {
             result::collect(a_args.iter().zip(b_args.iter())
                             .map(|(a, b)| this.args(*a, *b)))
@@ -409,7 +410,9 @@ pub fn super_fn_sigs<C:Combine>(this: &C, a: &ty::FnSig, b: &ty::FnSig) -> cres<
         return Err(ty::terr_variadic_mismatch(expected_found(this, a.variadic, b.variadic)));
     }
 
-    let inputs = if_ok!(argvecs(this, a.inputs, b.inputs));
+    let inputs = if_ok!(argvecs(this,
+                                a.inputs.as_slice(),
+                                b.inputs.as_slice()));
     let output = if_ok!(this.tys(a.output, b.output));
     Ok(FnSig {binder_id: a.binder_id,
               inputs: inputs,
@@ -497,17 +500,18 @@ pub fn super_tys<C:Combine>(this: &C, a: ty::t, b: ty::t) -> cres<ty::t> {
           Ok(ty::mk_enum(tcx, a_id, substs))
       }
 
-      (&ty::ty_trait(a_id, ref a_substs, a_store, a_mutbl, a_bounds),
-       &ty::ty_trait(b_id, ref b_substs, b_store, b_mutbl, b_bounds))
-      if a_id == b_id && a_mutbl == b_mutbl => {
-          let substs = if_ok!(this.substs(a_id, a_substs, b_substs));
-          let s = if_ok!(this.trait_stores(ty::terr_trait, a_store, b_store));
-          let bounds = if_ok!(this.bounds(a_bounds, b_bounds));
+      (&ty::ty_trait(ref a_),
+       &ty::ty_trait(ref b_))
+      if a_.def_id == b_.def_id && a_.mutability == b_.mutability => {
+          debug!("Trying to match traits {:?} and {:?}", a, b);
+          let substs = if_ok!(this.substs(a_.def_id, &a_.substs, &b_.substs));
+          let s = if_ok!(this.trait_stores(ty::terr_trait, a_.store, b_.store));
+          let bounds = if_ok!(this.bounds(a_.bounds, b_.bounds));
           Ok(ty::mk_trait(tcx,
-                          a_id,
+                          a_.def_id,
                           substs.clone(),
                           s,
-                          a_mutbl,
+                          a_.mutability,
                           bounds))
       }
 
@@ -566,7 +570,7 @@ pub fn super_tys<C:Combine>(this: &C, a: ty::t, b: ty::t) -> cres<ty::t> {
       }
 
       (&ty::ty_closure(ref a_fty), &ty::ty_closure(ref b_fty)) => {
-        this.closure_tys(a_fty, b_fty).and_then(|fty| {
+        this.closure_tys(*a_fty, *b_fty).and_then(|fty| {
             Ok(ty::mk_closure(tcx, fty))
         })
       }

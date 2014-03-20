@@ -57,7 +57,7 @@ they don't contain references to names that aren't actually defined.
 
 # Getting started
 
-> **WARNING**: The tarball and installer links are for the most recent
+> ***Warning:*** The tarball and installer links are for the most recent
 > release, not master. To use master, you **must** build from [git].
 
 The Rust compiler currently must be built from a [tarball] or [git], unless
@@ -80,13 +80,10 @@ You may find that other platforms work, but these are our "tier 1"
 supported build environments that are most likely to work.
 
 > ***Note:*** Windows users should read the detailed
-> "[getting started][wiki-start]" notes on the wiki. Even when using
+> [Getting started][wiki-start] notes on the wiki. Even when using
 > the binary installer, the Windows build requires a MinGW installation,
-> the precise details of which are not discussed here. Finally, `rustc` may
-> need to be [referred to as `rustc.exe`][bug-3319]. It's a bummer, we
-> know.
+> the precise details of which are not discussed here.
 
-[bug-3319]: https://github.com/mozilla/rust/issues/3319
 [wiki-start]: https://github.com/mozilla/rust/wiki/Note-getting-started-developing-Rust
 [git]: https://github.com/mozilla/rust.git
 
@@ -133,6 +130,10 @@ fn main() {
     println!("hello?");
 }
 ~~~~
+> ***Note:*** An identifier followed by an exclamation point, like
+> `println!`, is a macro invocation.  Macros are explained
+> [later](#syntax-extensions); for now just remember to include the
+> exclamation point.
 
 If the Rust compiler was installed successfully, running `rustc
 hello.rs` will produce an executable called `hello` (or `hello.exe` on
@@ -795,7 +796,7 @@ unit, `()`, as the empty tuple if you like).
 ~~~~
 let mytup: (int, int, f64) = (10, 20, 30.0);
 match mytup {
-  (a, b, c) => info!("{}", a + b + (c as int))
+  (a, b, c) => println!("{}", a + b + (c as int))
 }
 ~~~~
 
@@ -812,7 +813,7 @@ For example:
 struct MyTup(int, int, f64);
 let mytup: MyTup = MyTup(10, 20, 30.0);
 match mytup {
-  MyTup(a, b, c) => info!("{}", a + b + (c as int))
+  MyTup(a, b, c) => println!("{}", a + b + (c as int))
 }
 ~~~~
 
@@ -1026,7 +1027,7 @@ type was invalid because the size was infinite!
 
 An *owned box* (`~`) uses a dynamic memory allocation to provide the invariant
 of always being the size of a pointer, regardless of the contained type. This
-can be leverage to create a valid `List` definition:
+can be leveraged to create a valid `List` definition:
 
 ~~~
 enum List {
@@ -1054,12 +1055,14 @@ being destroyed along with the owner. Since the `list` variable above is
 immutable, the whole list is immutable. The memory allocation itself is the
 box, while the owner holds onto a pointer to it:
 
-              List box             List box           List box            List box
-            +--------------+    +--------------+    +--------------+    +--------------+
-    list -> | Cons | 1 | ~ | -> | Cons | 2 | ~ | -> | Cons | 3 | ~ | -> | Nil          |
-            +--------------+    +--------------+    +--------------+    +--------------+
+~~~ {.notrust}
+          List box             List box           List box            List box
+        +--------------+    +--------------+    +--------------+    +--------------+
+list -> | Cons | 1 | ~ | -> | Cons | 2 | ~ | -> | Cons | 3 | ~ | -> | Nil          |
+        +--------------+    +--------------+    +--------------+    +--------------+
+~~~
 
-> Note: the above diagram shows the logical contents of the enum. The actual
+> ***Note:*** the above diagram shows the logical contents of the enum. The actual
 > memory layout of the enum may vary. For example, for the `List` enum shown
 > above, Rust guarantees that there will be no enum tag field in the actual
 > structure. See the language reference for more details.
@@ -1114,7 +1117,7 @@ let z = x; // no new memory allocated, `x` can no longer be used
 ~~~~
 
 The `clone` method is provided by the `Clone` trait, and can be derived for
-our `List` type. Traits will be explained in detail later.
+our `List` type. Traits will be explained in detail [later](#traits).
 
 ~~~{.ignore}
 #[deriving(Clone)]
@@ -1169,7 +1172,7 @@ ownership of a list to be passed in rather than just mutating it in-place.
 The obvious signature for a `List` equality comparison is the following:
 
 ~~~{.ignore}
-fn eq(xs: List, ys: List) -> bool { ... }
+fn eq(xs: List, ys: List) -> bool { /* ... */ }
 ~~~
 
 However, this will cause both lists to be moved into the function. Ownership
@@ -1177,7 +1180,7 @@ isn't required to compare the lists, so the function should take *references*
 (&T) instead.
 
 ~~~{.ignore}
-fn eq(xs: &List, ys: &List) -> bool { ... }
+fn eq(xs: &List, ys: &List) -> bool { /* ... */ }
 ~~~
 
 A reference is a *non-owning* view of a value. A reference can be obtained with the `&` (address-of)
@@ -1207,8 +1210,8 @@ let ys = Cons(5, ~Cons(10, ~Nil));
 assert!(eq(&xs, &ys));
 ~~~
 
-Note that Rust doesn't guarantee [tail-call](http://en.wikipedia.org/wiki/Tail_call) optimization,
-but LLVM is able to handle a simple case like this with optimizations enabled.
+> ***Note:*** Rust doesn't guarantee [tail-call](http://en.wikipedia.org/wiki/Tail_call) optimization,
+> but LLVM is able to handle a simple case like this with optimizations enabled.
 
 ## Lists of other types
 
@@ -1217,6 +1220,9 @@ leveraging Rust's support for generics, it can be extended to work for any
 element type.
 
 The `u32` in the previous definition can be substituted with a type parameter:
+
+> ***Note:*** The following code introduces generics, which are explained in a
+> [dedicated section](#generics).
 
 ~~~
 enum List<T> {
@@ -1336,10 +1342,14 @@ impl<T: Eq> Eq for List<T> {
 
 let xs = Cons(5, ~Cons(10, ~Nil));
 let ys = Cons(5, ~Cons(10, ~Nil));
+// The methods below are part of the Eq trait,
+// which we implemented on our linked list.
 assert!(xs.eq(&ys));
-assert!(xs == ys);
 assert!(!xs.ne(&ys));
-assert!(!(xs != ys));
+
+// The Eq trait also allows us to use the shorthand infix operators.
+assert!(xs == ys);    // `xs == ys` is short for `xs.eq(&ys)`
+assert!(!(xs != ys)); // `xs != ys` is short for `xs.ne(&ys)`
 ~~~
 
 # More on boxes
@@ -1420,8 +1430,8 @@ bad, but often copies are expensive. So we’d like to define a function
 that takes the points by pointer. We can use references to do this:
 
 ~~~
+use std::num::sqrt;
 # struct Point { x: f64, y: f64 }
-# fn sqrt(f: f64) -> f64 { 0.0 }
 fn compute_distance(p1: &Point, p2: &Point) -> f64 {
     let x_d = p1.x - p2.x;
     let y_d = p1.y - p2.y;
@@ -1468,14 +1478,14 @@ For a more in-depth explanation of references and lifetimes, read the
 
 ## Freezing
 
-Lending an immutable pointer to an object freezes it and prevents mutation.
+Lending an &-pointer to an object freezes it and prevents mutation—even if the object was declared as `mut`.
 `Freeze` objects have freezing enforced statically at compile-time. An example
 of a non-`Freeze` type is [`RefCell<T>`][refcell].
 
 ~~~~
 let mut x = 5;
 {
-    let y = &x; // `x` is now frozen, it cannot be modified
+    let y = &x; // `x` is now frozen. It cannot be modified or re-assigned.
 }
 // `x` is now unfrozen again
 # x = 3;
@@ -1677,7 +1687,7 @@ let x = Rc::new([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 let y = x.clone(); // a new owner
 let z = x; // this moves `x` into `z`, rather than creating a new owner
 
-assert_eq!(*z.borrow(), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+assert!(*z == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 
 // the variable is mutable, but not the contents of the box
 let mut a = Rc::new([10, 9, 8, 7, 6, 5, 4, 3, 2, 1]);
@@ -1696,7 +1706,7 @@ let x = Gc::new([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 let y = x; // does not perform a move, unlike with `Rc`
 let z = x;
 
-assert_eq!(*z.borrow(), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+assert!(*z.borrow() == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 ~~~
 
 With shared ownership, mutability cannot be inherited so the boxes are always immutable. However,
@@ -1784,7 +1794,7 @@ use std::task::spawn;
 
 // proc is the closure which will be spawned.
 spawn(proc() {
-    debug!("I'm a new task")
+    println!("I'm a new task")
 });
 ~~~~
 
@@ -1870,9 +1880,9 @@ A caller must in turn have a compatible pointer type to call the method.
 #     Rectangle(Point, Point)
 # }
 impl Shape {
-    fn draw_reference(&self) { ... }
-    fn draw_owned(~self) { ... }
-    fn draw_value(self) { ... }
+    fn draw_reference(&self) { /* ... */ }
+    fn draw_owned(~self) { /* ... */ }
+    fn draw_value(self) { /* ... */ }
 }
 
 let s = Circle(Point { x: 1.0, y: 2.0 }, 3.0);
@@ -1895,9 +1905,9 @@ to a reference.
 #     Rectangle(Point, Point)
 # }
 # impl Shape {
-#    fn draw_reference(&self) { ... }
-#    fn draw_owned(~self) { ... }
-#    fn draw_value(self) { ... }
+#    fn draw_reference(&self) { /* ... */ }
+#    fn draw_owned(~self) { /* ... */ }
+#    fn draw_value(self) { /* ... */ }
 # }
 # let s = Circle(Point { x: 1.0, y: 2.0 }, 3.0);
 // As with typical function arguments, managed and owned pointers
@@ -1923,8 +1933,8 @@ These methods are the preferred way to define constructor functions.
 
 ~~~~ {.ignore}
 impl Circle {
-    fn area(&self) -> f64 { ... }
-    fn new(area: f64) -> Circle { ... }
+    fn area(&self) -> f64 { /* ... */ }
+    fn new(area: f64) -> Circle { /* ... */ }
 }
 ~~~~
 
@@ -2021,8 +2031,8 @@ C++ templates.
 
 ## Traits
 
-Within a generic function -- that is, a function parameterized by a
-type parameter, say, `T` -- the operations we can do on arguments of
+Within a generic function—that is, a function parameterized by a
+type parameter, say, `T`—the operations we can do on arguments of
 type `T` are quite limited.  After all, since we don't know what type
 `T` will be instantiated with, we can't safely modify or query values
 of type `T`.  This is where _traits_ come into play. Traits are Rust's
@@ -2084,6 +2094,10 @@ and may not be overridden:
 * `Send` - Sendable types.
 Types are sendable
 unless they contain managed boxes, managed closures, or references.
+
+* `Share` - Types that are *threadsafe*
+These are types that are safe to be used across several threads with access to
+a `&T` pointer. `MutexArc` is an example of a *sharable* type with internal mutable data.
 
 * `Freeze` - Constant (immutable) types.
 These are types that do not contain anything intrinsically mutable.
@@ -2384,8 +2398,8 @@ to an object:
 # fn new_rectangle() -> Rectangle { true }
 # fn draw_all(shapes: &[~Drawable]) {}
 
-impl Drawable for Circle { fn draw(&self) { ... } }
-impl Drawable for Rectangle { fn draw(&self) { ... } }
+impl Drawable for Circle { fn draw(&self) { /* ... */ } }
+impl Drawable for Rectangle { fn draw(&self) { /* ... */ } }
 
 let c: ~Circle = ~new_circle();
 let r: ~Rectangle = ~new_rectangle();
@@ -2499,7 +2513,7 @@ use std::f64::consts::PI;
 # impl Circle for CircleStruct { fn radius(&self) -> f64 { (self.area() / PI).sqrt() } }
 # impl Shape for CircleStruct { fn area(&self) -> f64 { PI * square(self.radius) } }
 
-let concrete = @CircleStruct{center:Point{x:3f,y:4f},radius:5f};
+let concrete = @CircleStruct{center:Point{x:3.0,y:4.0},radius:5.0};
 let mycircle: @Circle = concrete as @Circle;
 let nonsense = mycircle.radius() * mycircle.area();
 ~~~
@@ -2519,13 +2533,13 @@ of type `ABC` can be randomly generated and converted to a string:
 #[deriving(Eq)]
 struct Circle { radius: f64 }
 
-#[deriving(Rand, ToStr)]
+#[deriving(Clone, Show)]
 enum ABC { A, B, C }
 ~~~
 
 The full list of derivable traits is `Eq`, `TotalEq`, `Ord`,
 `TotalOrd`, `Encodable` `Decodable`, `Clone`, `DeepClone`,
-`IterBytes`, `Rand`, `Default`, `Zero`, `FromPrimitive` and `Show`.
+`Hash`, `Rand`, `Default`, `Zero`, `FromPrimitive` and `Show`.
 
 # Crates and the module system
 
@@ -2656,8 +2670,8 @@ mod farm {
     }
 
     impl Farm {
-        fn feed_chickens(&self) { ... }
-        pub fn add_chicken(&self, c: Chicken) { ... }
+        fn feed_chickens(&self) { /* ... */ }
+        pub fn add_chicken(&self, c: Chicken) { /* ... */ }
     }
 
     pub fn feed_animals(farm: &Farm) {
@@ -2786,11 +2800,11 @@ src/animals.rs
 
     src/mammals/humans.rs
     src/mammals/humans/mod.rs
-~~
+~~~
 
 If the animals file is `src/animals/mod.rs`, `rustc` will look for:
 
-~~ {.notrust}
+~~~ {.notrust}
 src/animals/mod.rs
     src/animals/fish.rs
     src/animals/fish/mod.rs
@@ -3133,9 +3147,10 @@ We define two crates, and use one of them as a library in the other.
 ~~~~
 // `world.rs`
 #[crate_id = "world#0.42"];
-# extern crate extra;
+
+# mod secret_module_to_make_this_test_run {
 pub fn explore() -> &'static str { "world" }
-# fn main() {}
+# }
 ~~~~
 
 ~~~~ {.ignore}
@@ -3156,7 +3171,7 @@ Now compile and run like this (adjust to your platform if necessary):
 Notice that the library produced contains the version in the file name
 as well as an inscrutable string of alphanumerics. As explained in the previous paragraph,
 these are both part of Rust's library versioning scheme. The alphanumerics are
-a hash representing the crates id.
+a hash representing the crate's id.
 
 ## The standard library and the prelude
 
@@ -3216,17 +3231,6 @@ Both auto-insertions can be disabled with an attribute if necessary:
 See the [API documentation][stddoc] for details.
 
 [stddoc]: std/index.html
-
-## The extra library
-
-Rust ships with crates such as the [extra library], an accumulation of useful things,
-that are however not important enough to deserve a place in the standard
-library.  You can link to a library such as `extra` with an `extern crate extra;`.
-
-[extra library]: extra/index.html
-
-Right now `extra` contains those definitions directly, but in the future it will likely just
-re-export a bunch of 'officially blessed' crates that get managed with a package manager.
 
 # What next?
 

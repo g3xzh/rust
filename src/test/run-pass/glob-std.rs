@@ -11,14 +11,21 @@
 // ignore-fast check-fast doesn't like 'extern crate extra'
 // ignore-win32 TempDir may cause IoError on windows: #10462
 
-extern crate extra;
+#[feature(macro_rules)];
+
 extern crate glob;
 
 use glob::glob;
-use extra::tempfile::TempDir;
 use std::unstable::finally::Finally;
 use std::{os, unstable};
 use std::io;
+use std::io::TempDir;
+
+macro_rules! assert_eq ( ($e1:expr, $e2:expr) => (
+    if $e1 != $e2 {
+        fail!("{} != {}", stringify!($e1), stringify!($e2))
+    }
+) )
 
 pub fn main() {
     fn mk_file(path: &str, directory: bool) {

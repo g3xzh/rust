@@ -12,13 +12,11 @@
 
 #[allow(dead_assignment)];
 
-extern crate extra;
-
 use std::task;
 
 pub fn main() { test00(); }
 
-fn test00_start(c: &Chan<int>, start: int,
+fn test00_start(c: &Sender<int>, start: int,
                 number_of_messages: int) {
     let mut i: int = 0;
     while i < number_of_messages { c.send(start + i); i += 1; }
@@ -27,35 +25,35 @@ fn test00_start(c: &Chan<int>, start: int,
 fn test00() {
     let mut r: int = 0;
     let mut sum: int = 0;
-    let (p, ch) = Chan::new();
+    let (tx, rx) = channel();
     let number_of_messages: int = 10;
 
-    let c = ch.clone();
+    let tx2 = tx.clone();
     task::spawn(proc() {
-        test00_start(&c, number_of_messages * 0, number_of_messages);
+        test00_start(&tx2, number_of_messages * 0, number_of_messages);
     });
-    let c = ch.clone();
+    let tx2 = tx.clone();
     task::spawn(proc() {
-        test00_start(&c, number_of_messages * 1, number_of_messages);
+        test00_start(&tx2, number_of_messages * 1, number_of_messages);
     });
-    let c = ch.clone();
+    let tx2 = tx.clone();
     task::spawn(proc() {
-        test00_start(&c, number_of_messages * 2, number_of_messages);
+        test00_start(&tx2, number_of_messages * 2, number_of_messages);
     });
-    let c = ch.clone();
+    let tx2 = tx.clone();
     task::spawn(proc() {
-        test00_start(&c, number_of_messages * 3, number_of_messages);
+        test00_start(&tx2, number_of_messages * 3, number_of_messages);
     });
 
     let mut i: int = 0;
     while i < number_of_messages {
-        r = p.recv();
+        r = rx.recv();
         sum += r;
-        r = p.recv();
+        r = rx.recv();
         sum += r;
-        r = p.recv();
+        r = rx.recv();
         sum += r;
-        r = p.recv();
+        r = rx.recv();
         sum += r;
         i += 1;
     }

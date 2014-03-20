@@ -12,6 +12,8 @@
 
 //! Validates all used crates and extern libraries and loads their metadata
 
+use back::link;
+use back::svh::Svh;
 use driver::{driver, session};
 use driver::session::Session;
 use metadata::csearch;
@@ -36,40 +38,33 @@ use syntax::visit;
 
 // Traverses an AST, reading all the information about use'd crates and extern
 // libraries necessary for later resolving, typechecking, linking, etc.
-pub fn read_crates(sess: Session,
+pub fn read_crates(sess: &Session,
                    krate: &ast::Crate,
                    os: loader::Os,
                    intr: @IdentInterner) {
     let mut e = Env {
         sess: sess,
         os: os,
-        crate_cache: @RefCell::new(~[]),
+        crate_cache: @RefCell::new(Vec::new()),
         next_crate_num: 1,
         intr: intr
     };
     visit_crate(&e, krate);
-    {
-        let mut v = ReadCrateVisitor {
-            e: &mut e
-        };
-        visit::walk_crate(&mut v, krate, ());
-    }
+    visit::walk_crate(&mut e, krate, ());
     let crate_cache = e.crate_cache.borrow();
-    dump_crates(*crate_cache.get());
-    warn_if_multiple_versions(&mut e, sess.diagnostic(), *crate_cache.get());
+    dump_crates(crate_cache.get().as_slice());
+    warn_if_multiple_versions(&mut e,
+                              sess.diagnostic(),
+                              crate_cache.get().as_slice());
 }
 
-struct ReadCrateVisitor<'a> {
-    e: &'a mut Env,
-}
-
-impl<'a> visit::Visitor<()> for ReadCrateVisitor<'a> {
+impl<'a> visit::Visitor<()> for Env<'a> {
     fn visit_view_item(&mut self, a: &ast::ViewItem, _: ()) {
-        visit_view_item(self.e, a);
+        visit_view_item(self, a);
         visit::walk_view_item(self, a, ());
     }
     fn visit_item(&mut self, a: &ast::Item, _: ()) {
-        visit_item(self.e, a);
+        visit_item(self, a);
         visit::walk_item(self, a, ());
     }
 }
@@ -78,8 +73,8 @@ impl<'a> visit::Visitor<()> for ReadCrateVisitor<'a> {
 struct cache_entry {
     cnum: ast::CrateNum,
     span: Span,
-    hash: ~str,
-    crateid: CrateId,
+    hash: Svh,
+    crate_id: CrateId,
 }
 
 fn dump_crates(crate_cache: &[cache_entry]) {
@@ -92,13 +87,13 @@ fn dump_crates(crate_cache: &[cache_entry]) {
 }
 
 fn warn_if_multiple_versions(e: &mut Env,
-                             diag: @SpanHandler,
+                             diag: &SpanHandler,
                              crate_cache: &[cache_entry]) {
     if crate_cache.len() != 0u {
-        let name = crate_cache[crate_cache.len() - 1].crateid.name.clone();
+        let name = crate_cache[crate_cache.len() - 1].crate_id.name.clone();
 
         let (matches, non_matches) = crate_cache.partitioned(|entry|
-            name == entry.crateid.name);
+            name == entry.crate_id.name);
 
         assert!(!matches.is_empty());
 
@@ -107,7 +102,7 @@ fn warn_if_multiple_versions(e: &mut Env,
                 format!("using multiple versions of crate `{}`", name));
             for match_ in matches.iter() {
                 diag.span_note(match_.span, "used here");
-                loader::note_crateid_attr(diag, &match_.crateid);
+                loader::note_crateid_attr(diag, &match_.crate_id);
             }
         }
 
@@ -115,21 +110,19 @@ fn warn_if_multiple_versions(e: &mut Env,
     }
 }
 
-struct Env {
-    sess: Session,
+struct Env<'a> {
+    sess: &'a Session,
     os: loader::Os,
-    crate_cache: @RefCell<~[cache_entry]>,
+    crate_cache: @RefCell<Vec<cache_entry>>,
     next_crate_num: ast::CrateNum,
     intr: @IdentInterner
 }
 
 fn visit_crate(e: &Env, c: &ast::Crate) {
-    let cstore = e.sess.cstore;
-
     for a in c.attrs.iter().filter(|m| m.name().equiv(&("link_args"))) {
         match a.value_str() {
-          Some(ref linkarg) => cstore.add_used_link_args(linkarg.get()),
-          None => { /* fallthrough */ }
+            Some(ref linkarg) => e.sess.cstore.add_used_link_args(linkarg.get()),
+            None => { /* fallthrough */ }
         }
     }
 }
@@ -138,7 +131,7 @@ fn visit_view_item(e: &mut Env, i: &ast::ViewItem) {
     let should_load = i.attrs.iter().all(|attr| {
         attr.name().get() != "phase" ||
             attr.meta_item_list().map_or(false, |phases| {
-                attr::contains_name(phases, "link")
+                attr::contains_name(phases.as_slice(), "link")
             })
     });
 
@@ -146,14 +139,9 @@ fn visit_view_item(e: &mut Env, i: &ast::ViewItem) {
         return;
     }
 
-    match extract_crate_info(i) {
+    match extract_crate_info(e, i) {
         Some(info) => {
-            let cnum = resolve_crate(e,
-                                     None,
-                                     info.ident.clone(),
-                                     info.name.clone(),
-                                     info.version.clone(),
-                                     ~"",
+            let cnum = resolve_crate(e, None, info.ident, &info.crate_id, None,
                                      i.span);
             e.sess.cstore.add_extern_mod_stmt_cnum(info.id, cnum);
         }
@@ -163,38 +151,33 @@ fn visit_view_item(e: &mut Env, i: &ast::ViewItem) {
 
 struct CrateInfo {
     ident: ~str,
-    name: ~str,
-    version: ~str,
+    crate_id: CrateId,
     id: ast::NodeId,
 }
 
-fn extract_crate_info(i: &ast::ViewItem) -> Option<CrateInfo> {
+fn extract_crate_info(e: &Env, i: &ast::ViewItem) -> Option<CrateInfo> {
     match i.node {
-        ast::ViewItemExternMod(ident, ref path_opt, id) => {
+        ast::ViewItemExternCrate(ident, ref path_opt, id) => {
             let ident = token::get_ident(ident);
             debug!("resolving extern crate stmt. ident: {:?} path_opt: {:?}",
                    ident, path_opt);
-            let (name, version) = match *path_opt {
+            let crate_id = match *path_opt {
                 Some((ref path_str, _)) => {
                     let crateid: Option<CrateId> = from_str(path_str.get());
                     match crateid {
-                        None => (~"", ~""),
-                        Some(crateid) => {
-                            let version = match crateid.version {
-                                None => ~"",
-                                Some(ref ver) => ver.to_str(),
-                            };
-                            (crateid.name.to_str(), version)
+                        None => {
+                            e.sess.span_err(i.span, "malformed crate id");
+                            return None
                         }
+                        Some(id) => id
                     }
                 }
-                None => (ident.get().to_str(), ~""),
+                None => from_str(ident.get().to_str()).unwrap()
             };
             Some(CrateInfo {
-                  ident: ident.get().to_str(),
-                  name: name,
-                  version: version,
-                  id: id,
+                ident: ident.get().to_str(),
+                crate_id: crate_id,
+                id: id,
             })
         }
         _ => None
@@ -209,7 +192,6 @@ fn visit_item(e: &Env, i: &ast::Item) {
             }
 
             // First, add all of the custom link_args attributes
-            let cstore = e.sess.cstore;
             let link_args = i.attrs.iter()
                 .filter_map(|at| if at.name().equiv(&("link_args")) {
                     Some(at)
@@ -219,13 +201,12 @@ fn visit_item(e: &Env, i: &ast::Item) {
                 .to_owned_vec();
             for m in link_args.iter() {
                 match m.value_str() {
-                    Some(linkarg) => cstore.add_used_link_args(linkarg.get()),
+                    Some(linkarg) => e.sess.cstore.add_used_link_args(linkarg.get()),
                     None => { /* fallthrough */ }
                 }
             }
 
             // Next, process all of the #[link(..)]-style arguments
-            let cstore = e.sess.cstore;
             let link_args = i.attrs.iter()
                 .filter_map(|at| if at.name().equiv(&("link")) {
                     Some(at)
@@ -274,7 +255,7 @@ fn visit_item(e: &Env, i: &ast::Item) {
                         if n.get().is_empty() {
                             e.sess.span_err(m.span, "#[link(name = \"\")] given with empty name");
                         } else {
-                            cstore.add_used_library(n.get().to_owned(), kind);
+                            e.sess.cstore.add_used_library(n.get().to_owned(), kind);
                         }
                     }
                     None => {}
@@ -285,100 +266,94 @@ fn visit_item(e: &Env, i: &ast::Item) {
     }
 }
 
-fn existing_match(e: &Env, name: &str, version: &str, hash: &str) -> Option<ast::CrateNum> {
+fn existing_match(e: &Env, crate_id: &CrateId,
+                  hash: Option<&Svh>) -> Option<ast::CrateNum> {
     let crate_cache = e.crate_cache.borrow();
     for c in crate_cache.get().iter() {
-        let crateid_version = match c.crateid.version {
-            None => ~"0.0",
-            Some(ref ver) => ver.to_str(),
-        };
-        if (name.is_empty() || name == c.crateid.name) &&
-            (version.is_empty() || version == crateid_version) &&
-            (hash.is_empty() || hash == c.hash) {
-            return Some(c.cnum);
+        if !crate_id.matches(&c.crate_id) { continue }
+        match hash {
+            Some(hash) if *hash != c.hash => {}
+            Some(..) | None => return Some(c.cnum)
         }
     }
     None
 }
 
 fn resolve_crate(e: &mut Env,
-                 root_ident: Option<~str>,
-                 ident: ~str,
-                 name: ~str,
-                 version: ~str,
-                 hash: ~str,
+                 root_ident: Option<&str>,
+                 ident: &str,
+                 crate_id: &CrateId,
+                 hash: Option<&Svh>,
                  span: Span)
               -> ast::CrateNum {
-    match existing_match(e, name, version, hash) {
-      None => {
-        let load_ctxt = loader::Context {
-            sess: e.sess,
-            span: span,
-            ident: ident,
-            name: name,
-            version: version,
-            hash: hash,
-            os: e.os,
-            intr: e.intr
-        };
-        let loader::Library {
-            dylib, rlib, metadata
-        } = load_ctxt.load_library_crate(root_ident.clone());
-
-        let attrs = decoder::get_crate_attributes(metadata.as_slice());
-        let crateid = attr::find_crateid(attrs).unwrap();
-        let hash = decoder::get_crate_hash(metadata.as_slice());
-
-        // Claim this crate number and cache it
-        let cnum = e.next_crate_num;
-        {
-            let mut crate_cache = e.crate_cache.borrow_mut();
-            crate_cache.get().push(cache_entry {
-                cnum: cnum,
+    match existing_match(e, crate_id, hash) {
+        None => {
+            let id_hash = link::crate_id_hash(crate_id);
+            let mut load_ctxt = loader::Context {
+                sess: e.sess,
                 span: span,
-                hash: hash,
-                crateid: crateid,
+                ident: ident,
+                crate_id: crate_id,
+                id_hash: id_hash,
+                hash: hash.map(|a| &*a),
+                os: e.os,
+                intr: e.intr,
+                rejected_via_hash: false,
+            };
+            let loader::Library {
+                dylib, rlib, metadata
+            } = load_ctxt.load_library_crate(root_ident);
+
+            let crate_id = decoder::get_crate_id(metadata.as_slice());
+            let hash = decoder::get_crate_hash(metadata.as_slice());
+
+            // Claim this crate number and cache it
+            let cnum = e.next_crate_num;
+            {
+                let mut crate_cache = e.crate_cache.borrow_mut();
+                crate_cache.get().push(cache_entry {
+                    cnum: cnum,
+                    span: span,
+                    hash: hash,
+                    crate_id: crate_id,
+                });
+            }
+            e.next_crate_num += 1;
+
+            // Maintain a reference to the top most crate.
+            let root_crate = match root_ident {
+                Some(c) => c,
+                None => load_ctxt.ident.clone()
+            };
+
+            // Now resolve the crates referenced by this crate
+            let cnum_map = resolve_crate_deps(e,
+            Some(root_crate),
+            metadata.as_slice(),
+            span);
+
+            let cmeta = @cstore::crate_metadata {
+                name: load_ctxt.crate_id.name.to_owned(),
+                data: metadata,
+                cnum_map: cnum_map,
+                cnum: cnum
+            };
+
+            e.sess.cstore.set_crate_data(cnum, cmeta);
+            e.sess.cstore.add_used_crate_source(cstore::CrateSource {
+                dylib: dylib,
+                rlib: rlib,
+                cnum: cnum,
             });
+            cnum
         }
-        e.next_crate_num += 1;
-
-        // Maintain a reference to the top most crate.
-        let root_crate = match root_ident {
-            Some(c) => c,
-            None => load_ctxt.ident.clone()
-        };
-
-        // Now resolve the crates referenced by this crate
-        let cnum_map = resolve_crate_deps(e,
-                                          Some(root_crate),
-                                          metadata.as_slice(),
-                                          span);
-
-        let cmeta = @cstore::crate_metadata {
-            name: load_ctxt.name,
-            data: metadata,
-            cnum_map: cnum_map,
-            cnum: cnum
-        };
-
-        let cstore = e.sess.cstore;
-        cstore.set_crate_data(cnum, cmeta);
-        cstore.add_used_crate_source(cstore::CrateSource {
-            dylib: dylib,
-            rlib: rlib,
-            cnum: cnum,
-        });
-        return cnum;
-      }
-      Some(cnum) => {
-        return cnum;
-      }
+        Some(cnum) => cnum
     }
 }
 
 // Go through the crate metadata and load any crates that it references
 fn resolve_crate_deps(e: &mut Env,
-                      root_ident: Option<~str>,
+                      root_ident: Option<&str>,
                       cdata: &[u8], span : Span)
                    -> cstore::cnum_map {
     debug!("resolving deps of external crate");
@@ -388,48 +363,30 @@ fn resolve_crate_deps(e: &mut Env,
     let r = decoder::get_crate_deps(cdata);
     for dep in r.iter() {
         let extrn_cnum = dep.cnum;
-        let cname_str = token::get_ident(dep.name);
-        debug!("resolving dep crate {} ver: {} hash: {}",
-               cname_str, dep.vers, dep.hash);
-        match existing_match(e,
-                             cname_str.get(),
-                             dep.vers,
-                             dep.hash) {
-          Some(local_cnum) => {
-            debug!("already have it");
-            // We've already seen this crate
-            cnum_map.insert(extrn_cnum, local_cnum);
-          }
-          None => {
-            debug!("need to load it");
-            // This is a new one so we've got to load it
-            let local_cnum = resolve_crate(e,
-                                           root_ident.clone(),
-                                           cname_str.get().to_str(),
-                                           cname_str.get().to_str(),
-                                           dep.vers.clone(),
-                                           dep.hash.clone(),
-                                           span);
-            cnum_map.insert(extrn_cnum, local_cnum);
-          }
-        }
+        debug!("resolving dep crate {} hash: `{}`", dep.crate_id, dep.hash);
+        let local_cnum = resolve_crate(e, root_ident,
+                                       dep.crate_id.name.as_slice(),
+                                       &dep.crate_id,
+                                       Some(&dep.hash),
+                                       span);
+        cnum_map.insert(extrn_cnum, local_cnum);
     }
     return @RefCell::new(cnum_map);
 }
 
-pub struct Loader {
-    priv env: Env,
+pub struct Loader<'a> {
+    priv env: Env<'a>,
 }
 
-impl Loader {
-    pub fn new(sess: Session) -> Loader {
+impl<'a> Loader<'a> {
+    pub fn new(sess: &'a Session) -> Loader<'a> {
         let os = driver::get_os(driver::host_triple()).unwrap();
         let os = session::sess_os_to_meta_os(os);
         Loader {
             env: Env {
                 sess: sess,
                 os: os,
-                crate_cache: @RefCell::new(~[]),
+                crate_cache: @RefCell::new(Vec::new()),
                 next_crate_num: 1,
                 intr: token::get_ident_interner(),
             }
@@ -437,16 +394,11 @@ impl Loader {
     }
 }
 
-impl CrateLoader for Loader {
+impl<'a> CrateLoader for Loader<'a> {
     fn load_crate(&mut self, krate: &ast::ViewItem) -> MacroCrate {
-        let info = extract_crate_info(krate).unwrap();
-        let cnum = resolve_crate(&mut self.env,
-                                 None,
-                                 info.ident.clone(),
-                                 info.name.clone(),
-                                 info.version.clone(),
-                                 ~"",
-                                 krate.span);
+        let info = extract_crate_info(&self.env, krate).unwrap();
+        let cnum = resolve_crate(&mut self.env, None, info.ident,
+                                 &info.crate_id, None, krate.span);
         let library = self.env.sess.cstore.get_used_crate_source(cnum).unwrap();
         MacroCrate {
             lib: library.dylib,
@@ -454,12 +406,13 @@ impl CrateLoader for Loader {
         }
     }
 
-    fn get_exported_macros(&mut self, cnum: ast::CrateNum) -> ~[~str] {
-        csearch::get_exported_macros(self.env.sess.cstore, cnum)
+    fn get_exported_macros(&mut self, cnum: ast::CrateNum) -> Vec<~str> {
+        csearch::get_exported_macros(&self.env.sess.cstore, cnum).move_iter()
+                                                                 .collect()
     }
 
     fn get_registrar_symbol(&mut self, cnum: ast::CrateNum) -> Option<~str> {
-        let cstore = self.env.sess.cstore;
+        let cstore = &self.env.sess.cstore;
         csearch::get_macro_registrar_fn(cstore, cnum)
             .map(|did| csearch::get_symbol(cstore, did))
     }

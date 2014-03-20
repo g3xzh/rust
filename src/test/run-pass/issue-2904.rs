@@ -14,10 +14,8 @@
 
 /// Map representation
 
-extern crate extra;
-
 use std::io;
-use std::to_str;
+use std::fmt;
 
 enum square {
     bot,
@@ -30,9 +28,9 @@ enum square {
     empty
 }
 
-impl to_str::ToStr for square {
-    fn to_str(&self) -> ~str {
-        match *self {
+impl fmt::Show for square {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f.buf, "{}", match *self {
           bot => { ~"R" }
           wall => { ~"#" }
           rock => { ~"*" }
@@ -41,7 +39,7 @@ impl to_str::ToStr for square {
           open_lift => { ~"O" }
           earth => { ~"." }
           empty => { ~" " }
-        }
+        })
     }
 }
 
@@ -56,7 +54,7 @@ fn square_from_char(c: char) -> square {
       '.'  => { earth }
       ' '  => { empty }
       _ => {
-        error!("invalid square: {:?}", c);
+        println!("invalid square: {:?}", c);
         fail!()
       }
     }

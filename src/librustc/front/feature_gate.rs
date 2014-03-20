@@ -30,6 +30,8 @@ use syntax::parse::token;
 
 use driver::session::Session;
 
+use std::cell::Cell;
+
 /// This is a list of all known features since the beginning of time. This list
 /// can never shrink, it may only be expanded (in order to prevent old programs
 /// from failing to compile). The status of each feature may change, however.
@@ -50,6 +52,7 @@ static KNOWN_FEATURES: &'static [(&'static str, Status)] = &[
     ("simd", Active),
     ("default_type_params", Active),
     ("quote", Active),
+    ("linkage", Active),
 
     // These are used to test this portion of the compiler, they don't actually
     // mean anything
@@ -69,12 +72,25 @@ enum Status {
     Accepted,
 }
 
-struct Context {
-    features: ~[&'static str],
-    sess: Session,
+/// A set of features to be used by later passes.
+pub struct Features {
+    default_type_params: Cell<bool>
 }
 
-impl Context {
+impl Features {
+    pub fn new() -> Features {
+        Features {
+            default_type_params: Cell::new(false)
+        }
+    }
+}
+
+struct Context<'a> {
+    features: Vec<&'static str>,
+    sess: &'a Session,
+}
+
+impl<'a> Context<'a> {
     fn gate_feature(&self, feature: &str, span: Span, explain: &str) {
         if !self.has_feature(feature) {
             self.sess.span_err(span, explain);
@@ -97,7 +113,7 @@ impl Context {
     }
 }
 
-impl Visitor<()> for Context {
+impl<'a> Visitor<()> for Context<'a> {
     fn visit_ident(&mut self, sp: Span, id: ast::Ident, _: ()) {
         if !token::get_ident(id).get().is_ascii() {
             self.gate_feature("non_ascii_idents", sp,
@@ -119,7 +135,7 @@ impl Visitor<()> for Context {
                     }
                 }
             }
-            ast::ViewItemExternMod(..) => {
+            ast::ViewItemExternCrate(..) => {
                 for attr in i.attrs.iter() {
                     if attr.name().get() == "phase"{
                         self.gate_feature("phase", attr.span,
@@ -156,7 +172,7 @@ impl Visitor<()> for Context {
             }
 
             ast::ItemForeignMod(..) => {
-                if attr::contains_name(i.attrs, "link_args") {
+                if attr::contains_name(i.attrs.as_slice(), "link_args") {
                     self.gate_feature("link_args", i.span,
                                       "the `link_args` attribute is not portable \
                                        across platforms, it is recommended to \
@@ -165,7 +181,7 @@ impl Visitor<()> for Context {
             }
 
             ast::ItemFn(..) => {
-                if attr::contains_name(i.attrs, "macro_registrar") {
+                if attr::contains_name(i.attrs.as_slice(), "macro_registrar") {
                     self.gate_feature("macro_registrar", i.span,
                                       "cross-crate macro exports are \
                                        experimental and possibly buggy");
@@ -173,7 +189,7 @@ impl Visitor<()> for Context {
             }
 
             ast::ItemStruct(..) => {
-                if attr::contains_name(i.attrs, "simd") {
+                if attr::contains_name(i.attrs.as_slice(), "simd") {
                     self.gate_feature("simd", i.span,
                                       "SIMD types are experimental and possibly buggy");
                 }
@@ -222,6 +238,19 @@ impl Visitor<()> for Context {
         }
     }
 
+    fn visit_foreign_item(&mut self, i: &ast::ForeignItem, _: ()) {
+        match i.node {
+            ast::ForeignItemFn(..) | ast::ForeignItemStatic(..) => {
+                if attr::contains_name(i.attrs.as_slice(), "linkage") {
+                    self.gate_feature("linkage", i.span,
+                                      "the `linkage` attribute is experimental \
+                                       and not portable across platforms")
+                }
+            }
+        }
+        visit::walk_foreign_item(self, i, ())
+    }
+
     fn visit_ty(&mut self, t: &ast::Ty, _: ()) {
         match t.node {
             ast::TyClosure(closure) if closure.onceness == ast::Once &&
@@ -240,7 +269,7 @@ impl Visitor<()> for Context {
 
     fn visit_expr(&mut self, e: &ast::Expr, _: ()) {
         match e.node {
-            ast::ExprUnary(_, ast::UnBox, _) => {
+            ast::ExprUnary(ast::UnBox, _) => {
                 self.gate_box(e.span);
             }
             _ => {}
@@ -263,9 +292,9 @@ impl Visitor<()> for Context {
     }
 }
 
-pub fn check_crate(sess: Session, krate: &ast::Crate) {
+pub fn check_crate(sess: &Session, krate: &ast::Crate) {
     let mut cx = Context {
-        features: ~[],
+        features: Vec::new(),
         sess: sess,
     };
 
@@ -315,4 +344,6 @@ pub fn check_crate(sess: Session, krate: &ast::Crate) {
     visit::walk_crate(&mut cx, krate, ());
 
     sess.abort_if_errors();
+
+    sess.features.default_type_params.set(cx.has_feature("default_type_params"));
 }

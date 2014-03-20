@@ -14,7 +14,7 @@ use middle::ty;
 use util::ppaux::Repr;
 
 pub trait TypeFolder {
-    fn tcx(&self) -> ty::ctxt;
+    fn tcx<'a>(&'a self) -> &'a ty::ctxt;
 
     fn fold_ty(&mut self, t: ty::t) -> ty::t {
         super_fold_ty(self, t)
@@ -84,16 +84,15 @@ pub fn fold_opt_ty<T:TypeFolder>(this: &mut T,
     t.map(|t| this.fold_ty(t))
 }
 
-pub fn fold_ty_vec<T:TypeFolder>(this: &mut T,
-                                 tys: &[ty::t])
-                                 -> ~[ty::t] {
-    tys.map(|t| this.fold_ty(*t))
+pub fn fold_ty_vec<T:TypeFolder>(this: &mut T, tys: &[ty::t]) -> Vec<ty::t> {
+    tys.iter().map(|t| this.fold_ty(*t)).collect()
 }
 
 pub fn super_fold_ty<T:TypeFolder>(this: &mut T,
                                    t: ty::t)
                                    -> ty::t {
-    ty::mk_t(this.tcx(), this.fold_sty(&ty::get(t).sty))
+    let sty = this.fold_sty(&ty::get(t).sty);
+    ty::mk_t(this.tcx(), sty)
 }
 
 pub fn super_fold_substs<T:TypeFolder>(this: &mut T,
@@ -110,14 +109,14 @@ pub fn super_fold_substs<T:TypeFolder>(this: &mut T,
 
     ty::substs { regions: regions,
                  self_ty: fold_opt_ty(this, substs.self_ty),
-                 tps: fold_ty_vec(this, substs.tps), }
+                 tps: fold_ty_vec(this, substs.tps.as_slice()), }
 }
 
 pub fn super_fold_sig<T:TypeFolder>(this: &mut T,
                                     sig: &ty::FnSig)
                                     -> ty::FnSig {
     ty::FnSig { binder_id: sig.binder_id,
-                inputs: fold_ty_vec(this, sig.inputs),
+                inputs: fold_ty_vec(this, sig.inputs.as_slice()),
                 output: this.fold_ty(sig.output),
                 variadic: sig.variadic }
 }
@@ -158,21 +157,23 @@ pub fn super_fold_sty<T:TypeFolder>(this: &mut T,
         ty::ty_enum(tid, ref substs) => {
             ty::ty_enum(tid, this.fold_substs(substs))
         }
-        ty::ty_trait(did, ref substs, st, mutbl, bounds) => {
-            ty::ty_trait(did,
-                     this.fold_substs(substs),
-                     this.fold_trait_store(st),
-                     mutbl,
-                     bounds)
+        ty::ty_trait(~ty::TyTrait { def_id, ref substs, store, mutability, bounds }) => {
+            ty::ty_trait(~ty::TyTrait{
+                def_id: def_id,
+                substs: this.fold_substs(substs),
+                store: this.fold_trait_store(store),
+                mutability: mutability,
+                bounds: bounds
+            })
         }
         ty::ty_tup(ref ts) => {
-            ty::ty_tup(fold_ty_vec(this, *ts))
+            ty::ty_tup(fold_ty_vec(this, ts.as_slice()))
         }
         ty::ty_bare_fn(ref f) => {
             ty::ty_bare_fn(this.fold_bare_fn_ty(f))
         }
         ty::ty_closure(ref f) => {
-            ty::ty_closure(this.fold_closure_ty(f))
+            ty::ty_closure(~this.fold_closure_ty(*f))
         }
         ty::ty_rptr(r, ref tm) => {
             ty::ty_rptr(this.fold_region(r),
@@ -218,12 +219,12 @@ pub fn super_fold_trait_store<T:TypeFolder>(this: &mut T,
 // Some sample folders
 
 pub struct BottomUpFolder<'a> {
-    tcx: ty::ctxt,
+    tcx: &'a ty::ctxt,
     fldop: 'a |ty::t| -> ty::t,
 }
 
 impl<'a> TypeFolder for BottomUpFolder<'a> {
-    fn tcx(&self) -> ty::ctxt { self.tcx }
+    fn tcx<'a>(&'a self) -> &'a ty::ctxt { self.tcx }
 
     fn fold_ty(&mut self, ty: ty::t) -> ty::t {
         let t1 = super_fold_ty(self, ty);
@@ -235,13 +236,13 @@ impl<'a> TypeFolder for BottomUpFolder<'a> {
 // Region folder
 
 pub struct RegionFolder<'a> {
-    tcx: ty::ctxt,
+    tcx: &'a ty::ctxt,
     fld_t: 'a |ty::t| -> ty::t,
     fld_r: 'a |ty::Region| -> ty::Region,
 }
 
 impl<'a> RegionFolder<'a> {
-    pub fn general(tcx: ty::ctxt,
+    pub fn general(tcx: &'a ty::ctxt,
                    fld_r: 'a |ty::Region| -> ty::Region,
                    fld_t: 'a |ty::t| -> ty::t)
                    -> RegionFolder<'a> {
@@ -252,7 +253,7 @@ impl<'a> RegionFolder<'a> {
         }
     }
 
-    pub fn regions(tcx: ty::ctxt, fld_r: 'a |ty::Region| -> ty::Region)
+    pub fn regions(tcx: &'a ty::ctxt, fld_r: 'a |ty::Region| -> ty::Region)
                    -> RegionFolder<'a> {
         fn noop(t: ty::t) -> ty::t { t }
 
@@ -265,7 +266,7 @@ impl<'a> RegionFolder<'a> {
 }
 
 impl<'a> TypeFolder for RegionFolder<'a> {
-    fn tcx(&self) -> ty::ctxt { self.tcx }
+    fn tcx<'a>(&'a self) -> &'a ty::ctxt { self.tcx }
 
     fn fold_ty(&mut self, ty: ty::t) -> ty::t {
         debug!("RegionFolder.fold_ty({})", ty.repr(self.tcx()));

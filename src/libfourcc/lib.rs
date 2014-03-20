@@ -43,6 +43,9 @@ fn main() {
 #[crate_type = "rlib"];
 #[crate_type = "dylib"];
 #[license = "MIT/ASL2"];
+#[doc(html_logo_url = "http://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
+      html_favicon_url = "http://www.rust-lang.org/favicon.ico",
+      html_root_url = "http://static.rust-lang.org/doc/master")];
 
 #[feature(macro_registrar, managed_boxes)];
 
@@ -131,7 +134,11 @@ struct Ident {
 }
 
 fn parse_tts(cx: &ExtCtxt, tts: &[ast::TokenTree]) -> (@ast::Expr, Option<Ident>) {
-    let p = &mut parse::new_parser_from_tts(cx.parse_sess(), cx.cfg(), tts.to_owned());
+    let p = &mut parse::new_parser_from_tts(cx.parse_sess(),
+                                            cx.cfg(),
+                                            tts.iter()
+                                               .map(|x| (*x).clone())
+                                               .collect());
     let ex = p.parse_expr();
     let id = if p.token == token::EOF {
         None
@@ -151,7 +158,7 @@ fn parse_tts(cx: &ExtCtxt, tts: &[ast::TokenTree]) -> (@ast::Expr, Option<Ident>
 fn target_endian_little(cx: &ExtCtxt, sp: Span) -> bool {
     let meta = cx.meta_name_value(sp, InternedString::new("target_endian"),
         ast::LitStr(InternedString::new("little"), ast::CookedStr));
-    contains(cx.cfg(), meta)
+    contains(cx.cfg().as_slice(), meta)
 }
 
 // FIXME (10872): This is required to prevent an LLVM assert on Windows

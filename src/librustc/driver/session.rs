@@ -12,9 +12,11 @@
 use back::target_strs;
 use back;
 use driver::driver::host_triple;
+use front;
 use metadata::filesearch;
 use metadata;
 use middle::lint;
+use util::nodemap::NodeMap;
 
 use syntax::attr::AttrMetaMethods;
 use syntax::ast::NodeId;
@@ -26,7 +28,7 @@ use syntax::{abi, ast, codemap};
 use syntax;
 
 use std::cell::{Cell, RefCell};
-use collections::{HashMap,HashSet};
+use collections::HashSet;
 
 pub struct Config {
     os: abi::Os,
@@ -72,8 +74,8 @@ debugging_opts!(
     0
 )
 
-pub fn debugging_opts_map() -> ~[(&'static str, &'static str, u64)] {
-    ~[("verbose", "in general, enable more debug printouts", VERBOSE),
+pub fn debugging_opts_map() -> Vec<(&'static str, &'static str, u64)> {
+    vec!(("verbose", "in general, enable more debug printouts", VERBOSE),
      ("time-passes", "measure time of each rustc pass", TIME_PASSES),
      ("count-llvm-insns", "count where LLVM \
                            instrs originate", COUNT_LLVM_INSNS),
@@ -100,8 +102,7 @@ pub fn debugging_opts_map() -> ~[(&'static str, &'static str, u64)] {
       PRINT_LLVM_PASSES),
      ("lto", "Perform LLVM link-time optimizations", LTO),
      ("ast-json", "Print the AST as JSON and halt", AST_JSON),
-     ("ast-json-noexpand", "Print the pre-expansion AST as JSON and halt", AST_JSON_NOEXPAND),
-    ]
+     ("ast-json-noexpand", "Print the pre-expansion AST as JSON and halt", AST_JSON_NOEXPAND))
 }
 
 #[deriving(Clone, Eq)]
@@ -112,22 +113,29 @@ pub enum OptLevel {
     Aggressive // -O3
 }
 
+#[deriving(Clone, Eq)]
+pub enum DebugInfoLevel {
+    NoDebugInfo,
+    LimitedDebugInfo,
+    FullDebugInfo,
+}
+
 #[deriving(Clone)]
 pub struct Options {
     // The crate config requested for the session, which may be combined
     // with additional crate configurations during the compile process
-    crate_types: ~[CrateType],
+    crate_types: Vec<CrateType> ,
 
     gc: bool,
     optimize: OptLevel,
-    debuginfo: bool,
-    lint_opts: ~[(lint::Lint, lint::level)],
-    output_types: ~[back::link::OutputType],
+    debuginfo: DebugInfoLevel,
+    lint_opts: Vec<(lint::Lint, lint::level)> ,
+    output_types: Vec<back::link::OutputType> ,
     // This was mutable for rustpkg, which updates search paths based on the
     // parsed code. It remains mutable in case its replacements wants to use
     // this.
-    addl_lib_search_paths: @RefCell<HashSet<Path>>,
-    maybe_sysroot: Option<@Path>,
+    addl_lib_search_paths: RefCell<HashSet<Path>>,
+    maybe_sysroot: Option<Path>,
     target_triple: ~str,
     // User-specified cfg meta items. The compiler itself will add additional
     // items to the crate config, and during parsing the entire crate config
@@ -157,7 +165,7 @@ pub enum EntryFnType {
     EntryNone,
 }
 
-#[deriving(Eq, Clone, TotalOrd, TotalEq)]
+#[deriving(Eq, Ord, Clone, TotalOrd, TotalEq)]
 pub enum CrateType {
     CrateTypeExecutable,
     CrateTypeDylib,
@@ -165,79 +173,79 @@ pub enum CrateType {
     CrateTypeStaticlib,
 }
 
-pub struct Session_ {
-    targ_cfg: @Config,
-    opts: @Options,
-    cstore: @metadata::cstore::CStore,
-    parse_sess: @ParseSess,
-    codemap: @codemap::CodeMap,
+pub struct Session {
+    targ_cfg: Config,
+    opts: Options,
+    cstore: metadata::cstore::CStore,
+    parse_sess: ParseSess,
     // For a library crate, this is always none
     entry_fn: RefCell<Option<(NodeId, codemap::Span)>>,
     entry_type: Cell<Option<EntryFnType>>,
-    span_diagnostic: @diagnostic::SpanHandler,
     macro_registrar_fn: RefCell<Option<ast::DefId>>,
-    filesearch: @filesearch::FileSearch,
+    default_sysroot: Option<Path>,
     building_library: Cell<bool>,
     // The name of the root source file of the crate, in the local file system. The path is always
     // expected to be absolute. `None` means that there is no source file.
     local_crate_source_file: Option<Path>,
     working_dir: Path,
-    lints: RefCell<HashMap<ast::NodeId,
-                           ~[(lint::Lint, codemap::Span, ~str)]>>,
+    lints: RefCell<NodeMap<Vec<(lint::Lint, codemap::Span, ~str)>>>,
     node_id: Cell<ast::NodeId>,
-    crate_types: @RefCell<~[CrateType]>,
+    crate_types: RefCell<Vec<CrateType>>,
+    features: front::feature_gate::Features,
+
+    /// The maximum recursion limit for potentially infinitely recursive
+    /// operations such as auto-dereference and monomorphization.
+    recursion_limit: Cell<uint>,
 }
 
-pub type Session = @Session_;
-
-impl Session_ {
+impl Session {
     pub fn span_fatal(&self, sp: Span, msg: &str) -> ! {
-        self.span_diagnostic.span_fatal(sp, msg)
+        self.diagnostic().span_fatal(sp, msg)
     }
     pub fn fatal(&self, msg: &str) -> ! {
-        self.span_diagnostic.handler().fatal(msg)
+        self.diagnostic().handler().fatal(msg)
     }
     pub fn span_err(&self, sp: Span, msg: &str) {
-        self.span_diagnostic.span_err(sp, msg)
+        self.diagnostic().span_err(sp, msg)
     }
     pub fn err(&self, msg: &str) {
-        self.span_diagnostic.handler().err(msg)
+        self.diagnostic().handler().err(msg)
     }
     pub fn err_count(&self) -> uint {
-        self.span_diagnostic.handler().err_count()
+        self.diagnostic().handler().err_count()
     }
     pub fn has_errors(&self) -> bool {
-        self.span_diagnostic.handler().has_errors()
+        self.diagnostic().handler().has_errors()
     }
     pub fn abort_if_errors(&self) {
-        self.span_diagnostic.handler().abort_if_errors()
+        self.diagnostic().handler().abort_if_errors()
     }
     pub fn span_warn(&self, sp: Span, msg: &str) {
-        self.span_diagnostic.span_warn(sp, msg)
+        self.diagnostic().span_warn(sp, msg)
     }
     pub fn warn(&self, msg: &str) {
-        self.span_diagnostic.handler().warn(msg)
+        self.diagnostic().handler().warn(msg)
     }
     pub fn span_note(&self, sp: Span, msg: &str) {
-        self.span_diagnostic.span_note(sp, msg)
+        self.diagnostic().span_note(sp, msg)
     }
     pub fn span_end_note(&self, sp: Span, msg: &str) {
-        self.span_diagnostic.span_end_note(sp, msg)
+        self.diagnostic().span_end_note(sp, msg)
     }
     pub fn note(&self, msg: &str) {
-        self.span_diagnostic.handler().note(msg)
+        self.diagnostic().handler().note(msg)
     }
     pub fn span_bug(&self, sp: Span, msg: &str) -> ! {
-        self.span_diagnostic.span_bug(sp, msg)
+        self.diagnostic().span_bug(sp, msg)
     }
     pub fn bug(&self, msg: &str) -> ! {
-        self.span_diagnostic.handler().bug(msg)
+        self.diagnostic().handler().bug(msg)
     }
     pub fn span_unimpl(&self, sp: Span, msg: &str) -> ! {
-        self.span_diagnostic.span_unimpl(sp, msg)
+        self.diagnostic().span_unimpl(sp, msg)
     }
     pub fn unimpl(&self, msg: &str) -> ! {
-        self.span_diagnostic.handler().unimpl(msg)
+        self.diagnostic().handler().unimpl(msg)
     }
     pub fn add_lint(&self,
                     lint: lint::Lint,
@@ -249,7 +257,7 @@ impl Session_ {
             Some(arr) => { arr.push((lint, sp, msg)); return; }
             None => {}
         }
-        lints.get().insert(id, ~[(lint, sp, msg)]);
+        lints.get().insert(id, vec!((lint, sp, msg)));
     }
     pub fn next_node_id(&self) -> ast::NodeId {
         self.reserve_node_ids(1)
@@ -264,11 +272,14 @@ impl Session_ {
 
         v
     }
-    pub fn diagnostic(&self) -> @diagnostic::SpanHandler {
-        self.span_diagnostic
+    pub fn diagnostic<'a>(&'a self) -> &'a diagnostic::SpanHandler {
+        &self.parse_sess.span_diagnostic
     }
     pub fn debugging_opt(&self, opt: u64) -> bool {
         (self.opts.debugging_opts & opt) != 0
+    }
+    pub fn codemap<'a>(&'a self) -> &'a codemap::CodeMap {
+        &self.parse_sess.span_diagnostic.cm
     }
     // This exists to help with refactoring to eliminate impossible
     // cases later on
@@ -303,21 +314,32 @@ impl Session_ {
     pub fn show_span(&self) -> bool {
         self.debugging_opt(SHOW_SPAN)
     }
+    pub fn filesearch<'a>(&'a self) -> filesearch::FileSearch<'a> {
+        let sysroot = match self.opts.maybe_sysroot {
+            Some(ref sysroot) => sysroot,
+            None => self.default_sysroot.as_ref()
+                        .expect("missing sysroot and default_sysroot in Session")
+        };
+        filesearch::FileSearch::new(
+            sysroot,
+            self.opts.target_triple,
+            &self.opts.addl_lib_search_paths)
+    }
 }
 
 /// Some reasonable defaults
-pub fn basic_options() -> @Options {
-    @Options {
-        crate_types: ~[],
+pub fn basic_options() -> Options {
+    Options {
+        crate_types: Vec::new(),
         gc: false,
         optimize: No,
-        debuginfo: false,
-        lint_opts: ~[],
-        output_types: ~[],
-        addl_lib_search_paths: @RefCell::new(HashSet::new()),
+        debuginfo: NoDebugInfo,
+        lint_opts: Vec::new(),
+        output_types: Vec::new(),
+        addl_lib_search_paths: RefCell::new(HashSet::new()),
         maybe_sysroot: None,
         target_triple: host_triple(),
-        cfg: ~[],
+        cfg: Vec::new(),
         test: false,
         parse_only: false,
         no_trans: false,
@@ -384,7 +406,8 @@ macro_rules! cgoptions(
             }
         }
 
-        fn parse_list(slot: &mut ~[~str], v: Option<&str>) -> bool {
+        fn parse_list(slot: &mut Vec<~str>, v: Option<&str>)
+                      -> bool {
             match v {
                 Some(s) => {
                     for s in s.words() {
@@ -404,15 +427,15 @@ cgoptions!(
         "tool to assemble archives with"),
     linker: Option<~str> = (None, parse_opt_string,
         "system linker to link outputs with"),
-    link_args: ~[~str] = (~[], parse_list,
+    link_args: Vec<~str> = (Vec::new(), parse_list,
         "extra arguments to pass to the linker (space separated)"),
     target_cpu: ~str = (~"generic", parse_string,
         "select target processor (llc -mcpu=help for details)"),
     target_feature: ~str = (~"", parse_string,
         "target specific attributes (llc -mattr=help for details)"),
-    passes: ~[~str] = (~[], parse_list,
+    passes: Vec<~str> = (Vec::new(), parse_list,
         "a list of extra LLVM passes to run (space separated)"),
-    llvm_args: ~[~str] = (~[], parse_list,
+    llvm_args: Vec<~str> = (Vec::new(), parse_list,
         "a list of arguments to pass to llvm (space separated)"),
     save_temps: bool = (false, parse_bool,
         "save all temporary output files during compilation"),
@@ -437,7 +460,7 @@ cgoptions!(
 )
 
 // Seems out of place, but it uses session, so I'm putting it here
-pub fn expect<T:Clone>(sess: Session, opt: Option<T>, msg: || -> ~str) -> T {
+pub fn expect<T:Clone>(sess: &Session, opt: Option<T>, msg: || -> ~str) -> T {
     diagnostic::expect(sess.diagnostic(), opt, msg)
 }
 
@@ -449,7 +472,8 @@ pub fn building_library(options: &Options, krate: &ast::Crate) -> bool {
             CrateTypeStaticlib | CrateTypeDylib | CrateTypeRlib => return true
         }
     }
-    match syntax::attr::first_attr_value_str_by_name(krate.attrs, "crate_type") {
+    match syntax::attr::first_attr_value_str_by_name(krate.attrs.as_slice(),
+                                                     "crate_type") {
         Some(s) => {
             s.equiv(&("lib")) ||
             s.equiv(&("rlib")) ||
@@ -465,11 +489,11 @@ pub fn default_lib_output() -> CrateType {
 }
 
 pub fn collect_crate_types(session: &Session,
-                           attrs: &[ast::Attribute]) -> ~[CrateType] {
+                           attrs: &[ast::Attribute]) -> Vec<CrateType> {
     // If we're generating a test executable, then ignore all other output
     // styles at all other locations
     if session.opts.test {
-        return ~[CrateTypeExecutable];
+        return vec!(CrateTypeExecutable)
     }
     let mut base = session.opts.crate_types.clone();
     let mut iter = attrs.iter().filter_map(|a| {
@@ -505,7 +529,7 @@ pub fn collect_crate_types(session: &Session,
     if base.len() == 0 {
         base.push(CrateTypeExecutable);
     }
-    base.sort();
+    base.as_mut_slice().sort();
     base.dedup();
     return base;
 }

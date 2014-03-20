@@ -16,11 +16,17 @@
 #[crate_type = "rlib"];
 #[crate_type = "dylib"];
 #[license = "MIT/ASL2"];
+#[doc(html_logo_url = "http://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
+      html_favicon_url = "http://www.rust-lang.org/favicon.ico",
+      html_root_url = "http://static.rust-lang.org/doc/master")];
 
-#[feature(macro_rules, managed_boxes)];
+#[feature(macro_rules, managed_boxes, default_type_params, phase)];
+#[allow(deprecated_owned_vector)]; // NOTE: remove after stage0
 
-extern crate serialize;
+extern crate rand;
+
 #[cfg(test)] extern crate test;
+#[cfg(test)] #[phase(syntax, link)] extern crate log;
 
 pub use bitv::Bitv;
 pub use btree::BTree;

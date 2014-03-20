@@ -10,44 +10,41 @@
 
 // ignore-fast
 
-extern crate extra;
-
 use std::task;
 
-pub fn main() { info!("===== WITHOUT THREADS ====="); test00(); }
+pub fn main() { println!("===== WITHOUT THREADS ====="); test00(); }
 
-fn test00_start(ch: &Chan<int>, message: int, count: int) {
-    info!("Starting test00_start");
+fn test00_start(ch: &Sender<int>, message: int, count: int) {
+    println!("Starting test00_start");
     let mut i: int = 0;
     while i < count {
-        info!("Sending Message");
+        println!("Sending Message");
         ch.send(message + 0);
         i = i + 1;
     }
-    info!("Ending test00_start");
+    println!("Ending test00_start");
 }
 
 fn test00() {
     let number_of_tasks: int = 16;
     let number_of_messages: int = 4;
 
-    info!("Creating tasks");
+    println!("Creating tasks");
 
-    let (po, ch) = Chan::new();
+    let (tx, rx) = channel();
 
     let mut i: int = 0;
 
     // Create and spawn tasks...
     let mut results = ~[];
     while i < number_of_tasks {
-        let ch = ch.clone();
+        let tx = tx.clone();
         let mut builder = task::task();
         results.push(builder.future_result());
         builder.spawn({
-            let ch = ch;
             let i = i;
             proc() {
-                test00_start(&ch, i, number_of_messages)
+                test00_start(&tx, i, number_of_messages)
             }
         });
         i = i + 1;
@@ -58,7 +55,7 @@ fn test00() {
     for _r in results.iter() {
         i = 0;
         while i < number_of_messages {
-            let value = po.recv();
+            let value = rx.recv();
             sum += value;
             i = i + 1;
         }
@@ -67,8 +64,8 @@ fn test00() {
     // Join spawned tasks...
     for r in results.iter() { r.recv(); }
 
-    info!("Completed: Final number is: ");
-    error!("{:?}", sum);
+    println!("Completed: Final number is: ");
+    println!("{:?}", sum);
     // assert (sum == (((number_of_tasks * (number_of_tasks - 1)) / 2) *
     //       number_of_messages));
     assert_eq!(sum, 480);

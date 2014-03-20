@@ -12,14 +12,12 @@
 
 #[feature(managed_boxes)];
 
-extern crate extra;
-
 use std::io;
 use std::io::stdio::StdReader;
 use std::io::BufferedReader;
 use std::os;
 use std::intrinsics::cttz16;
-use std::vec;
+use std::slice;
 
 // Computes a single solution to a given 9x9 sudoku
 //
@@ -50,8 +48,8 @@ impl Sudoku {
     }
 
     pub fn from_vec(vec: &[[u8, ..9], ..9]) -> Sudoku {
-        let g = vec::from_fn(9u, |i| {
-            vec::from_fn(9u, |j| { vec[i][j] })
+        let g = slice::from_fn(9u, |i| {
+            slice::from_fn(9u, |j| { vec[i][j] })
         });
         return Sudoku::new(g)
     }
@@ -70,9 +68,9 @@ impl Sudoku {
     pub fn read(mut reader: BufferedReader<StdReader>) -> Sudoku {
         assert!(reader.read_line().unwrap() == ~"9,9"); /* assert first line is exactly "9,9" */
 
-        let mut g = vec::from_fn(10u, { |_i| ~[0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8] });
+        let mut g = slice::from_fn(10u, { |_i| ~[0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8] });
         for line in reader.lines() {
-            let comps: ~[&str] = line.trim().split(',').collect();
+            let comps: ~[&str] = line.unwrap().trim().split(',').collect();
 
             if comps.len() == 3u {
                 let row     = from_str::<uint>(comps[0]).unwrap() as u8;

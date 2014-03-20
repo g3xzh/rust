@@ -22,21 +22,21 @@ use collections::HashMap;
 
 ///an unzipping of `TokenTree`s
 struct TtFrame {
-    forest: @~[ast::TokenTree],
+    forest: @Vec<ast::TokenTree> ,
     idx: Cell<uint>,
     dotdotdoted: bool,
     sep: Option<Token>,
     up: Option<@TtFrame>,
 }
 
-pub struct TtReader {
-    sp_diag: @SpanHandler,
+pub struct TtReader<'a> {
+    sp_diag: &'a SpanHandler,
     // the unzipped tree:
     priv stack: RefCell<@TtFrame>,
     /* for MBE-style macro transcription */
     priv interpolations: RefCell<HashMap<Ident, @NamedMatch>>,
-    priv repeat_idx: RefCell<~[uint]>,
-    priv repeat_len: RefCell<~[uint]>,
+    priv repeat_idx: RefCell<Vec<uint> >,
+    priv repeat_len: RefCell<Vec<uint> >,
     /* cached: */
     cur_tok: RefCell<Token>,
     cur_span: RefCell<Span>,
@@ -45,10 +45,10 @@ pub struct TtReader {
 /** This can do Macro-By-Example transcription. On the other hand, if
  *  `src` contains no `TTSeq`s and `TTNonterminal`s, `interp` can (and
  *  should) be none. */
-pub fn new_tt_reader(sp_diag: @SpanHandler,
-                     interp: Option<HashMap<Ident, @NamedMatch>>,
-                     src: ~[ast::TokenTree])
-                     -> TtReader {
+pub fn new_tt_reader<'a>(sp_diag: &'a SpanHandler,
+                         interp: Option<HashMap<Ident, @NamedMatch>>,
+                         src: Vec<ast::TokenTree> )
+                         -> TtReader<'a> {
     let r = TtReader {
         sp_diag: sp_diag,
         stack: RefCell::new(@TtFrame {
@@ -62,14 +62,14 @@ pub fn new_tt_reader(sp_diag: @SpanHandler,
             None => RefCell::new(HashMap::new()),
             Some(x) => RefCell::new(x),
         },
-        repeat_idx: RefCell::new(~[]),
-        repeat_len: RefCell::new(~[]),
+        repeat_idx: RefCell::new(Vec::new()),
+        repeat_len: RefCell::new(Vec::new()),
         /* dummy values, never read: */
         cur_tok: RefCell::new(EOF),
         cur_span: RefCell::new(DUMMY_SP),
     };
     tt_next_token(&r); /* get cur_tok and cur_span set up */
-    return r;
+    r
 }
 
 fn dup_tt_frame(f: @TtFrame) -> @TtFrame {
@@ -85,7 +85,7 @@ fn dup_tt_frame(f: @TtFrame) -> @TtFrame {
     }
 }
 
-pub fn dup_tt_reader(r: &TtReader) -> TtReader {
+pub fn dup_tt_reader<'a>(r: &TtReader<'a>) -> TtReader<'a> {
     TtReader {
         sp_diag: r.sp_diag,
         stack: RefCell::new(dup_tt_frame(r.stack.get())),
@@ -106,7 +106,7 @@ fn lookup_cur_matched_by_matched(r: &TtReader, start: @NamedMatch)
                 // end of the line; duplicate henceforth
                 ad
             }
-            MatchedSeq(ref ads, _) => ads[*idx]
+            MatchedSeq(ref ads, _) => *ads.get(*idx)
         }
     }
     let repeat_idx = r.repeat_idx.borrow();
@@ -217,7 +217,8 @@ pub fn tt_next_token(r: &TtReader) -> TokenAndSpan {
             r.stack.get().idx.set(0u);
             {
                 let mut repeat_idx = r.repeat_idx.borrow_mut();
-                repeat_idx.get()[repeat_idx.get().len() - 1u] += 1u;
+                let last_repeat_idx = repeat_idx.get().len() - 1u;
+                *repeat_idx.get().get_mut(last_repeat_idx) += 1u;
             }
             match r.stack.get().sep.clone() {
               Some(tk) => {
@@ -231,7 +232,7 @@ pub fn tt_next_token(r: &TtReader) -> TokenAndSpan {
     loop { /* because it's easiest, this handles `TTDelim` not starting
     with a `TTTok`, even though it won't happen */
         // FIXME(pcwalton): Bad copy.
-        match r.stack.get().forest[r.stack.get().idx.get()].clone() {
+        match (*r.stack.get().forest.get(r.stack.get().idx.get())).clone() {
           TTDelim(tts) => {
             r.stack.set(@TtFrame {
                 forest: tts,

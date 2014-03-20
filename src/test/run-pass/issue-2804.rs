@@ -11,10 +11,10 @@
 // except according to those terms.
 
 extern crate collections;
-extern crate extra;
+extern crate serialize;
 
-use extra::json;
 use collections::HashMap;
+use serialize::json;
 use std::option;
 
 enum object {
@@ -25,11 +25,11 @@ enum object {
 fn lookup(table: ~json::Object, key: ~str, default: ~str) -> ~str
 {
     match table.find(&key) {
-        option::Some(&extra::json::String(ref s)) => {
+        option::Some(&json::String(ref s)) => {
             (*s).clone()
         }
         option::Some(value) => {
-            error!("{} was expected to be a string but is a {:?}", key, value);
+            println!("{} was expected to be a string but is a {:?}", key, value);
             default
         }
         option::None => {
@@ -38,28 +38,28 @@ fn lookup(table: ~json::Object, key: ~str, default: ~str) -> ~str
     }
 }
 
-fn add_interface(_store: int, managed_ip: ~str, data: extra::json::Json) -> (~str, object)
+fn add_interface(_store: int, managed_ip: ~str, data: json::Json) -> (~str, object)
 {
     match &data {
-        &extra::json::Object(ref interface) => {
+        &json::Object(ref interface) => {
             let name = lookup((*interface).clone(), ~"ifDescr", ~"");
             let label = format!("{}-{}", managed_ip, name);
 
             (label, bool_value(false))
         }
         _ => {
-            error!("Expected dict for {} interfaces but found {:?}", managed_ip, data);
+            println!("Expected dict for {} interfaces but found {:?}", managed_ip, data);
             (~"gnos:missing-interface", bool_value(true))
         }
     }
 }
 
-fn add_interfaces(store: int, managed_ip: ~str, device: HashMap<~str, extra::json::Json>)
+fn add_interfaces(store: int, managed_ip: ~str, device: HashMap<~str, json::Json>)
 -> ~[(~str, object)]
 {
     match device.get(&~"interfaces")
     {
-        &extra::json::List(ref interfaces) =>
+        &json::List(ref interfaces) =>
         {
           interfaces.map(|interface| {
                 add_interface(store, managed_ip.clone(), (*interface).clone())
@@ -67,7 +67,7 @@ fn add_interfaces(store: int, managed_ip: ~str, device: HashMap<~str, extra::jso
         }
         _ =>
         {
-            error!("Expected list for {} interfaces but found {:?}", managed_ip,
+            println!("Expected list for {} interfaces but found {:?}", managed_ip,
                    device.get(&~"interfaces"));
             ~[]
         }

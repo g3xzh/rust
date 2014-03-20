@@ -19,7 +19,7 @@ use middle::trans::base;
 use middle::trans::build;
 use middle::trans::callee;
 use middle::trans::common;
-use middle::trans::common::{Block, FunctionContext};
+use middle::trans::common::{Block, FunctionContext, ExprId};
 use middle::trans::glue;
 use middle::trans::type_::Type;
 use middle::ty;
@@ -51,20 +51,20 @@ pub static EXIT_BREAK: uint = 0;
 pub static EXIT_LOOP: uint = 1;
 pub static EXIT_MAX: uint = 2;
 
-enum CleanupScopeKind<'a> {
+pub enum CleanupScopeKind<'a> {
     CustomScopeKind,
     AstScopeKind(ast::NodeId),
     LoopScopeKind(ast::NodeId, [&'a Block<'a>, ..EXIT_MAX])
 }
 
 #[deriving(Eq)]
-enum EarlyExitLabel {
+pub enum EarlyExitLabel {
     UnwindExit,
     ReturnExit,
     LoopExit(ast::NodeId, uint)
 }
 
-struct CachedEarlyExit {
+pub struct CachedEarlyExit {
     label: EarlyExitLabel,
     cleanup_block: BasicBlockRef,
 }
@@ -205,7 +205,7 @@ impl<'a> CleanupMethods<'a> for FunctionContext<'a> {
                 _ => {}
             }
         }
-        self.ccx.tcx.sess.bug("no loop scope found");
+        self.ccx.sess().bug("no loop scope found");
     }
 
     fn normal_exit_block(&'a self,
@@ -238,10 +238,10 @@ impl<'a> CleanupMethods<'a> for FunctionContext<'a> {
          * instance of `ty`
          */
 
-        if !ty::type_needs_drop(self.ccx.tcx, ty) { return; }
+        if !ty::type_needs_drop(self.ccx.tcx(), ty) { return; }
         let drop = ~DropValue {
             is_immediate: false,
-            on_unwind: ty::type_needs_unwind_cleanup(self.ccx.tcx, ty),
+            on_unwind: ty::type_needs_unwind_cleanup(self.ccx.tcx(), ty),
             val: val,
             ty: ty
         };
@@ -249,7 +249,7 @@ impl<'a> CleanupMethods<'a> for FunctionContext<'a> {
         debug!("schedule_drop_mem({:?}, val={}, ty={})",
                cleanup_scope,
                self.ccx.tn.val_to_str(val),
-               ty.repr(self.ccx.tcx));
+               ty.repr(self.ccx.tcx()));
 
         self.schedule_clean(cleanup_scope, drop as ~Cleanup);
     }
@@ -262,10 +262,10 @@ impl<'a> CleanupMethods<'a> for FunctionContext<'a> {
          * Schedules a (deep) drop of `val`, which is an instance of `ty`
          */
 
-        if !ty::type_needs_drop(self.ccx.tcx, ty) { return; }
+        if !ty::type_needs_drop(self.ccx.tcx(), ty) { return; }
         let drop = ~DropValue {
             is_immediate: true,
-            on_unwind: ty::type_needs_unwind_cleanup(self.ccx.tcx, ty),
+            on_unwind: ty::type_needs_unwind_cleanup(self.ccx.tcx(), ty),
             val: val,
             ty: ty
         };
@@ -273,7 +273,7 @@ impl<'a> CleanupMethods<'a> for FunctionContext<'a> {
         debug!("schedule_drop_immediate({:?}, val={}, ty={})",
                cleanup_scope,
                self.ccx.tn.val_to_str(val),
-               ty.repr(self.ccx.tcx));
+               ty.repr(self.ccx.tcx()));
 
         self.schedule_clean(cleanup_scope, drop as ~Cleanup);
     }
@@ -330,7 +330,7 @@ impl<'a> CleanupMethods<'a> for FunctionContext<'a> {
             }
         }
 
-        self.ccx.tcx.sess.bug(
+        self.ccx.sess().bug(
             format!("no cleanup scope {} found",
                     self.ccx.tcx.map.node_to_str(cleanup_scope)));
     }
@@ -349,7 +349,7 @@ impl<'a> CleanupMethods<'a> for FunctionContext<'a> {
         assert!(self.is_valid_custom_scope(custom_scope));
 
         let mut scopes = self.scopes.borrow_mut();
-        let scope = &mut scopes.get()[custom_scope.index];
+        let scope = scopes.get().get_mut(custom_scope.index);
         scope.cleanups.push(cleanup);
         scope.clear_cached_exits();
     }
@@ -433,7 +433,7 @@ impl<'a> CleanupHelperMethods<'a> for FunctionContext<'a> {
     fn is_valid_custom_scope(&self, custom_scope: CustomScopeIndex) -> bool {
         let scopes = self.scopes.borrow();
         custom_scope.index < scopes.get().len() &&
-            scopes.get()[custom_scope.index].kind.is_temp()
+            scopes.get().get(custom_scope.index).kind.is_temp()
     }
 
     fn trans_scope_cleanups(&self, // cannot borrow self, will recurse
@@ -540,7 +540,7 @@ impl<'a> CleanupHelperMethods<'a> for FunctionContext<'a> {
                     }
 
                     LoopExit(id, _) => {
-                        self.ccx.tcx.sess.bug(format!(
+                        self.ccx.sess().bug(format!(
                                 "cannot exit from scope {:?}, \
                                 not in scope", id));
                     }
@@ -669,11 +669,13 @@ impl<'a> CleanupHelperMethods<'a> for FunctionContext<'a> {
         // The landing pad return type (the type being propagated). Not sure what
         // this represents but it's determined by the personality function and
         // this is what the EH proposal example uses.
-        let llretty = Type::struct_([Type::i8p(), Type::i32()], false);
+        let llretty = Type::struct_(self.ccx,
+                                    [Type::i8p(self.ccx), Type::i32(self.ccx)],
+                                    false);
 
         // The exception handling personality function.
         let def_id = common::langcall(pad_bcx, None, "", EhPersonalityLangItem);
-        let llpersonality = callee::trans_fn_ref(pad_bcx, def_id, 0);
+        let llpersonality = callee::trans_fn_ref(pad_bcx, def_id, ExprId(0));
 
         // The only landing pad clause will be 'cleanup'
         let llretval = build::LandingPad(pad_bcx, llretty, llpersonality, 1u);
@@ -846,7 +848,7 @@ impl Cleanup for FreeValue {
     }
 }
 
-pub fn temporary_scope(tcx: ty::ctxt,
+pub fn temporary_scope(tcx: &ty::ctxt,
                        id: ast::NodeId)
                        -> ScopeId {
     match tcx.region_maps.temporary_scope(id) {
@@ -861,7 +863,7 @@ pub fn temporary_scope(tcx: ty::ctxt,
     }
 }
 
-pub fn var_scope(tcx: ty::ctxt,
+pub fn var_scope(tcx: &ty::ctxt,
                  id: ast::NodeId)
                  -> ScopeId {
     let r = AstScope(tcx.region_maps.var_scope(id));

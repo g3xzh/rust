@@ -15,13 +15,12 @@
 #[license = "MIT/ASL2"];
 #[crate_type = "rlib"];
 #[crate_type = "dylib"];
-#[doc(html_logo_url = "http://www.rust-lang.org/logos/rust-logo-128x128-blk.png",
+#[doc(html_logo_url = "http://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
       html_favicon_url = "http://www.rust-lang.org/favicon.ico",
       html_root_url = "http://static.rust-lang.org/doc/master")];
 
 #[feature(macro_rules)];
-#[deny(non_camel_case_types)];
-#[allow(missing_doc)];
+#[allow(deprecated_owned_vector)]; // NOTE: remove after stage0
 
 extern crate collections;
 
@@ -155,8 +154,6 @@ impl<T: Writer> Terminal<T> {
             if s.is_ok() {
                 try!(self.out.write(s.unwrap()));
                 return Ok(true)
-            } else {
-                warn!("{}", s.unwrap_err());
             }
         }
         Ok(false)
@@ -176,8 +173,6 @@ impl<T: Writer> Terminal<T> {
             if s.is_ok() {
                 try!(self.out.write(s.unwrap()));
                 return Ok(true)
-            } else {
-                warn!("{}", s.unwrap_err());
             }
         }
         Ok(false)
@@ -198,8 +193,6 @@ impl<T: Writer> Terminal<T> {
                     if s.is_ok() {
                         try!(self.out.write(s.unwrap()));
                         return Ok(true)
-                    } else {
-                        warn!("{}", s.unwrap_err());
                     }
                 }
                 Ok(false)
@@ -236,12 +229,6 @@ impl<T: Writer> Terminal<T> {
         });
         if s.is_ok() {
             return self.out.write(s.unwrap())
-        } else if self.num_colors > 0 {
-            warn!("{}", s.unwrap_err());
-        } else {
-            // if we support attributes but not color, it would be nice to still warn!()
-            // but it's not worth testing all known attributes just for this.
-            debug!("{}", s.unwrap_err());
         }
         Ok(())
     }

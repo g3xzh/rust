@@ -47,7 +47,7 @@ use fmt;
 use sync::atomics::{AtomicInt, INIT_ATOMIC_INT, SeqCst};
 use path::{Path, GenericPath};
 use iter::Iterator;
-use vec::{Vector, CloneableVector, ImmutableVector, MutableVector, OwnedVector};
+use slice::{Vector, CloneableVector, ImmutableVector, MutableVector, OwnedVector};
 use ptr::RawPtr;
 
 #[cfg(unix)]
@@ -101,8 +101,8 @@ pub mod win32 {
     use os::TMPBUF_SZ;
     use str::StrSlice;
     use str;
-    use vec::{MutableVector, ImmutableVector, OwnedVector};
-    use vec;
+    use slice::{MutableVector, ImmutableVector, OwnedVector};
+    use slice;
 
     pub fn fill_utf16_buf_and_decode(f: |*mut u16, DWORD| -> DWORD)
         -> Option<~str> {
@@ -112,7 +112,7 @@ pub mod win32 {
             let mut res = None;
             let mut done = false;
             while !done {
-                let mut buf = vec::from_elem(n as uint, 0u16);
+                let mut buf = slice::from_elem(n as uint, 0u16);
                 let k = f(buf.as_mut_ptr(), n);
                 if k == (0 as DWORD) {
                     done = true;
@@ -412,7 +412,7 @@ pub fn self_exe_name() -> Option<Path> {
         unsafe {
             use libc::funcs::bsd44::*;
             use libc::consts::os::extra::*;
-            use vec;
+            use slice;
             let mib = ~[CTL_KERN as c_int,
                         KERN_PROC as c_int,
                         KERN_PROC_PATHNAME as c_int, -1 as c_int];
@@ -422,7 +422,7 @@ pub fn self_exe_name() -> Option<Path> {
                              0u as libc::size_t);
             if err != 0 { return None; }
             if sz == 0 { return None; }
-            let mut v: ~[u8] = vec::with_capacity(sz as uint);
+            let mut v: ~[u8] = slice::with_capacity(sz as uint);
             let err = sysctl(mib.as_ptr(), mib.len() as ::libc::c_uint,
                              v.as_mut_ptr() as *mut c_void, &mut sz, ptr::null(),
                              0u as libc::size_t);
@@ -448,11 +448,11 @@ pub fn self_exe_name() -> Option<Path> {
     fn load_self() -> Option<~[u8]> {
         unsafe {
             use libc::funcs::extra::_NSGetExecutablePath;
-            use vec;
+            use slice;
             let mut sz: u32 = 0;
             _NSGetExecutablePath(ptr::mut_null(), &mut sz);
             if sz == 0 { return None; }
-            let mut v: ~[u8] = vec::with_capacity(sz as uint);
+            let mut v: ~[u8] = slice::with_capacity(sz as uint);
             let err = _NSGetExecutablePath(v.as_mut_ptr() as *mut i8, &mut sz);
             if err != 0 { return None; }
             v.set_len(sz as uint - 1); // chop off trailing NUL
@@ -615,7 +615,6 @@ pub fn errno() -> int {
     #[cfg(target_os = "macos")]
     #[cfg(target_os = "freebsd")]
     fn errno_location() -> *c_int {
-        #[nolink]
         extern {
             fn __error() -> *c_int;
         }
@@ -627,7 +626,6 @@ pub fn errno() -> int {
     #[cfg(target_os = "linux")]
     #[cfg(target_os = "android")]
     fn errno_location() -> *c_int {
-        #[nolink]
         extern {
             fn __errno_location() -> *c_int;
         }
@@ -665,7 +663,6 @@ pub fn last_os_error() -> ~str {
         #[cfg(target_os = "freebsd")]
         fn strerror_r(errnum: c_int, buf: *mut c_char, buflen: libc::size_t)
                       -> c_int {
-            #[nolink]
             extern {
                 fn strerror_r(errnum: c_int, buf: *mut c_char,
                               buflen: libc::size_t) -> c_int;
@@ -681,7 +678,6 @@ pub fn last_os_error() -> ~str {
         #[cfg(target_os = "linux")]
         fn strerror_r(errnum: c_int, buf: *mut c_char,
                       buflen: libc::size_t) -> c_int {
-            #[nolink]
             extern {
                 fn __xpg_strerror_r(errnum: c_int,
                                     buf: *mut c_char,
@@ -821,7 +817,7 @@ fn real_args() -> ~[~str] {
 
 #[cfg(windows)]
 fn real_args() -> ~[~str] {
-    use vec;
+    use slice;
 
     let mut nArgs: c_int = 0;
     let lpArgCount: *mut c_int = &mut nArgs;
@@ -837,7 +833,7 @@ fn real_args() -> ~[~str] {
             while *ptr.offset(len as int) != 0 { len += 1; }
 
             // Push it onto the list.
-            let opt_s = vec::raw::buf_as_slice(ptr, len, |buf| {
+            let opt_s = slice::raw::buf_as_slice(ptr, len, |buf| {
                     str::from_utf16(str::truncate_utf16_at_nul(buf))
                 });
             args.push(opt_s.expect("CommandLineToArgvW returned invalid UTF-16"));
@@ -1131,14 +1127,8 @@ impl Drop for MemoryMap {
         if self.len == 0 { /* workaround for dummy_stack */ return; }
 
         unsafe {
-            match libc::munmap(self.data as *c_void, self.len as libc::size_t) {
-                0 => (),
-                -1 => match errno() as c_int {
-                    libc::EINVAL => error!("invalid addr or len"),
-                    e => error!("unknown errno={}", e)
-                },
-                r => error!("Unexpected result {}", r)
-            }
+            // FIXME: what to do if this fails?
+            let _ = libc::munmap(self.data as *c_void, self.len as libc::size_t);
         }
     }
 }
@@ -1165,10 +1155,7 @@ impl MemoryMap {
                 MapAddr(addr_) => { lpAddress = addr_ as LPVOID; },
                 MapFd(fd_) => { fd = fd_; },
                 MapOffset(offset_) => { offset = offset_; },
-                MapNonStandardFlags(f) => {
-                    info!("MemoryMap::new: MapNonStandardFlags used on \
-                           Windows: {}", f)
-                }
+                MapNonStandardFlags(..) => {}
             }
         }
 
@@ -1266,15 +1253,15 @@ impl Drop for MemoryMap {
                 MapVirtual => {
                     if libc::VirtualFree(self.data as *mut c_void, 0,
                                          libc::MEM_RELEASE) == 0 {
-                        error!("VirtualFree failed: {}", errno());
+                        println!("VirtualFree failed: {}", errno());
                     }
                 },
                 MapFile(mapping) => {
                     if libc::UnmapViewOfFile(self.data as LPCVOID) == FALSE {
-                        error!("UnmapViewOfFile failed: {}", errno());
+                        println!("UnmapViewOfFile failed: {}", errno());
                     }
                     if libc::CloseHandle(mapping as HANDLE) == FALSE {
-                        error!("CloseHandle failed: {}", errno());
+                        println!("CloseHandle failed: {}", errno());
                     }
                 }
             }
@@ -1396,7 +1383,6 @@ mod tests {
     use rand::Rng;
     use rand;
 
-
     #[test]
     pub fn last_os_error() {
         debug!("{}", os::last_os_error());
@@ -1409,7 +1395,7 @@ mod tests {
     }
 
     fn make_rand_name() -> ~str {
-        let mut rng = rand::rng();
+        let mut rng = rand::task_rng();
         let n = ~"TEST" + rng.gen_ascii_str(10u);
         assert!(getenv(n).is_none());
         n
@@ -1535,7 +1521,7 @@ mod tests {
         let oldhome = getenv("HOME");
 
         setenv("HOME", "/home/MountainView");
-        assert_eq!(os::homedir(), Some(Path::new("/home/MountainView")));
+        assert!(os::homedir() == Some(Path::new("/home/MountainView")));
 
         setenv("HOME", "");
         assert!(os::homedir().is_none());
@@ -1556,16 +1542,16 @@ mod tests {
         assert!(os::homedir().is_none());
 
         setenv("HOME", "/home/MountainView");
-        assert_eq!(os::homedir(), Some(Path::new("/home/MountainView")));
+        assert!(os::homedir() == Some(Path::new("/home/MountainView")));
 
         setenv("HOME", "");
 
         setenv("USERPROFILE", "/home/MountainView");
-        assert_eq!(os::homedir(), Some(Path::new("/home/MountainView")));
+        assert!(os::homedir() == Some(Path::new("/home/MountainView")));
 
         setenv("HOME", "/home/MountainView");
         setenv("USERPROFILE", "/home/PaloAlto");
-        assert_eq!(os::homedir(), Some(Path::new("/home/MountainView")));
+        assert!(os::homedir() == Some(Path::new("/home/MountainView")));
 
         for s in oldhome.iter() { setenv("HOME", *s) }
         for s in olduserprofile.iter() { setenv("USERPROFILE", *s) }

@@ -48,22 +48,17 @@
 #[license = "MIT/ASL2"];
 #[crate_type = "rlib"];
 #[crate_type = "dylib"];
-#[doc(html_logo_url = "http://www.rust-lang.org/logos/rust-logo-128x128-blk.png",
+#[doc(html_logo_url = "http://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
       html_favicon_url = "http://www.rust-lang.org/favicon.ico",
       html_root_url = "http://static.rust-lang.org/doc/master")];
-
-#[feature(macro_rules, globs, asm, managed_boxes, thread_local, link_args, simd)];
-
-// Turn on default type parameters.
-#[feature(default_type_params)];
-#[allow(default_type_param_usage)];
+#[feature(macro_rules, globs, asm, managed_boxes, thread_local, link_args,
+          simd, linkage, default_type_params, phase)];
 
 // Don't link to std. We are std.
 #[no_std];
 
-#[deny(non_camel_case_types)];
 #[deny(missing_doc)];
-#[allow(unknown_features)];
+#[allow(deprecated_owned_vector)]; // NOTE: remove after stage0
 
 // When testing libstd, bring in libuv as the I/O backend so tests can print
 // things and all of the std::io tests have an I/O interface to run on top
@@ -71,15 +66,20 @@
 #[cfg(test)] extern crate rustuv;
 #[cfg(test)] extern crate native;
 #[cfg(test)] extern crate green;
+#[cfg(test)] #[phase(syntax, link)] extern crate log;
 
-// Make extra accessible for benchmarking
-#[cfg(test)] extern crate extra = "extra";
+// Make and rand accessible for benchmarking/testcases
+#[cfg(test)] extern crate rand;
 
 // Make std testable by not duplicating lang items. See #2912
 #[cfg(test)] extern crate realstd = "std";
 #[cfg(test)] pub use kinds = realstd::kinds;
 #[cfg(test)] pub use ops = realstd::ops;
 #[cfg(test)] pub use cmp = realstd::cmp;
+#[cfg(test)] pub use ty = realstd::ty;
+
+#[cfg(stage0)]
+pub use vec_ng = vec;
 
 pub mod macros;
 
@@ -116,8 +116,8 @@ pub mod bool;
 pub mod char;
 pub mod tuple;
 
+pub mod slice;
 pub mod vec;
-pub mod vec_ng;
 pub mod str;
 
 pub mod ascii;
@@ -135,6 +135,7 @@ pub mod gc;
 #[cfg(not(test))] pub mod kinds;
 #[cfg(not(test))] pub mod ops;
 #[cfg(not(test))] pub mod cmp;
+#[cfg(not(test))] pub mod ty;
 
 
 /* Common traits */
@@ -143,14 +144,11 @@ pub mod from_str;
 pub mod num;
 pub mod iter;
 pub mod to_str;
-pub mod to_bytes;
 pub mod clone;
-pub mod hash_old;
 pub mod hash;
 pub mod container;
 pub mod default;
 pub mod any;
-
 
 /* Common data structures */
 
@@ -172,15 +170,13 @@ pub mod sync;
 #[unstable]
 pub mod libc;
 pub mod c_str;
+pub mod c_vec;
 pub mod os;
 pub mod io;
 pub mod path;
-pub mod rand;
-pub mod run;
 pub mod cast;
 pub mod fmt;
 pub mod cleanup;
-pub mod logging;
 pub mod mem;
 
 
@@ -223,12 +219,11 @@ mod std {
     pub use io;
     pub use kinds;
     pub use local_data;
-    pub use logging;
     pub use option;
     pub use os;
     pub use rt;
     pub use str;
-    pub use to_bytes;
     pub use to_str;
+    pub use ty;
     pub use unstable;
 }

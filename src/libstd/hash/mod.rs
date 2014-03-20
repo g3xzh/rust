@@ -66,10 +66,12 @@
 use container::Container;
 use io::Writer;
 use iter::Iterator;
+use ops::Deref;
 use option::{Option, Some, None};
 use rc::Rc;
 use str::{Str, StrSlice};
-use vec::{Vector, ImmutableVector};
+use slice::{Vector, ImmutableVector};
+use vec::Vec;
 
 /// Reexport the `sip::hash` function as our default hasher.
 pub use hash = self::sip::hash;
@@ -180,7 +182,7 @@ macro_rules! impl_hash_tuple(
     );
 )
 
-impl_hash_tuple!(A0 A1 A2 A3 A4 A5 A6 A7)
+impl_hash_tuple!(a0 a1 a2 a3 a4 a5 a6 a7)
 
 impl<'a, S: Writer, T: Hash<S>> Hash<S> for &'a [T] {
     #[inline]
@@ -201,6 +203,13 @@ impl<'a, S: Writer, T: Hash<S>> Hash<S> for &'a mut [T] {
 }
 
 impl<S: Writer, T: Hash<S>> Hash<S> for ~[T] {
+    #[inline]
+    fn hash(&self, state: &mut S) {
+        self.as_slice().hash(state);
+    }
+}
+
+impl<S: Writer, T: Hash<S>> Hash<S> for Vec<T> {
     #[inline]
     fn hash(&self, state: &mut S) {
         self.as_slice().hash(state);
@@ -238,7 +247,7 @@ impl<S: Writer, T: Hash<S>> Hash<S> for @T {
 impl<S: Writer, T: Hash<S>> Hash<S> for Rc<T> {
     #[inline]
     fn hash(&self, state: &mut S) {
-        self.borrow().hash(state);
+        self.deref().hash(state);
     }
 }
 
@@ -284,7 +293,7 @@ mod tests {
     use iter::{Iterator};
     use option::{Some, None};
     use result::Ok;
-    use vec::ImmutableVector;
+    use slice::ImmutableVector;
 
     use super::{Hash, Hasher};
 

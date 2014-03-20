@@ -8,8 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-extern crate extra;
-
 use std::os;
 use std::uint;
 
@@ -22,12 +20,12 @@ fn parfib(n: uint) -> uint {
         return 1;
     }
 
-    let (port,chan) = Chan::new();
+    let (tx, rx) = channel();
     spawn(proc() {
-        chan.send(parfib(n-1));
+        tx.send(parfib(n-1));
     });
     let m2 = parfib(n-2);
-    return (port.recv() + m2);
+    return (rx.recv() + m2);
 }
 
 fn main() {

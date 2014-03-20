@@ -24,10 +24,10 @@ pointers, and then storing the parent pointers as `Weak` pointers.
 */
 
 use cast::transmute;
-use clone::{Clone, DeepClone};
+use clone::Clone;
 use cmp::{Eq, Ord};
 use kinds::marker;
-use ops::Drop;
+use ops::{Deref, Drop};
 use option::{Option, Some, None};
 use ptr;
 use rt::global_heap::exchange_free;
@@ -42,7 +42,8 @@ struct RcBox<T> {
 #[unsafe_no_drop_flag]
 pub struct Rc<T> {
     priv ptr: *mut RcBox<T>,
-    priv marker: marker::NoSend
+    priv nosend: marker::NoSend,
+    priv noshare: marker::NoShare
 }
 
 impl<T> Rc<T> {
@@ -56,25 +57,32 @@ impl<T> Rc<T> {
                 // strong destructor is running, even if the weak
                 // pointer is stored inside the strong one.
                 ptr: transmute(~RcBox { value: value, strong: 1, weak: 1 }),
-                marker: marker::NoSend,
+                nosend: marker::NoSend,
+                noshare: marker::NoShare
             }
         }
     }
 }
 
 impl<T> Rc<T> {
-    /// Borrow the value contained in the reference-counted box
-    #[inline(always)]
-    pub fn borrow<'a>(&'a self) -> &'a T {
-        unsafe { &(*self.ptr).value }
-    }
-
     /// Downgrade the reference-counted pointer to a weak reference
     pub fn downgrade(&self) -> Weak<T> {
         unsafe {
             (*self.ptr).weak += 1;
-            Weak { ptr: self.ptr, marker: marker::NoSend }
+            Weak {
+                ptr: self.ptr,
+                nosend: marker::NoSend,
+                noshare: marker::NoShare
+            }
         }
+    }
+}
+
+impl<T> Deref<T> for Rc<T> {
+    /// Borrow the value contained in the reference-counted box
+    #[inline(always)]
+    fn deref<'a>(&'a self) -> &'a T {
+        unsafe { &(*self.ptr).value }
     }
 }
 
@@ -85,7 +93,7 @@ impl<T> Drop for Rc<T> {
             if self.ptr != 0 as *mut RcBox<T> {
                 (*self.ptr).strong -= 1;
                 if (*self.ptr).strong == 0 {
-                    ptr::read(self.borrow()); // destroy the contained object
+                    ptr::read(self.deref()); // destroy the contained object
 
                     // remove the implicit "strong weak" pointer now
                     // that we've destroyed the contents.
@@ -105,45 +113,39 @@ impl<T> Clone for Rc<T> {
     fn clone(&self) -> Rc<T> {
         unsafe {
             (*self.ptr).strong += 1;
-            Rc { ptr: self.ptr, marker: marker::NoSend }
+            Rc { ptr: self.ptr, nosend: marker::NoSend, noshare: marker::NoShare }
         }
-    }
-}
-
-impl<T: DeepClone> DeepClone for Rc<T> {
-    #[inline]
-    fn deep_clone(&self) -> Rc<T> {
-        Rc::new(self.borrow().deep_clone())
     }
 }
 
 impl<T: Eq> Eq for Rc<T> {
     #[inline(always)]
-    fn eq(&self, other: &Rc<T>) -> bool { *self.borrow() == *other.borrow() }
+    fn eq(&self, other: &Rc<T>) -> bool { *self.deref() == *other.deref() }
 
     #[inline(always)]
-    fn ne(&self, other: &Rc<T>) -> bool { *self.borrow() != *other.borrow() }
+    fn ne(&self, other: &Rc<T>) -> bool { *self.deref() != *other.deref() }
 }
 
 impl<T: Ord> Ord for Rc<T> {
     #[inline(always)]
-    fn lt(&self, other: &Rc<T>) -> bool { *self.borrow() < *other.borrow() }
+    fn lt(&self, other: &Rc<T>) -> bool { *self.deref() < *other.deref() }
 
     #[inline(always)]
-    fn le(&self, other: &Rc<T>) -> bool { *self.borrow() <= *other.borrow() }
+    fn le(&self, other: &Rc<T>) -> bool { *self.deref() <= *other.deref() }
 
     #[inline(always)]
-    fn gt(&self, other: &Rc<T>) -> bool { *self.borrow() > *other.borrow() }
+    fn gt(&self, other: &Rc<T>) -> bool { *self.deref() > *other.deref() }
 
     #[inline(always)]
-    fn ge(&self, other: &Rc<T>) -> bool { *self.borrow() >= *other.borrow() }
+    fn ge(&self, other: &Rc<T>) -> bool { *self.deref() >= *other.deref() }
 }
 
 /// Weak reference to a reference-counted box
 #[unsafe_no_drop_flag]
 pub struct Weak<T> {
     priv ptr: *mut RcBox<T>,
-    priv marker: marker::NoSend
+    priv nosend: marker::NoSend,
+    priv noshare: marker::NoShare
 }
 
 impl<T> Weak<T> {
@@ -154,7 +156,7 @@ impl<T> Weak<T> {
                 None
             } else {
                 (*self.ptr).strong += 1;
-                Some(Rc { ptr: self.ptr, marker: marker::NoSend })
+                Some(Rc { ptr: self.ptr, nosend: marker::NoSend, noshare: marker::NoShare })
             }
         }
     }
@@ -181,7 +183,7 @@ impl<T> Clone for Weak<T> {
     fn clone(&self) -> Weak<T> {
         unsafe {
             (*self.ptr).weak += 1;
-            Weak { ptr: self.ptr, marker: marker::NoSend }
+            Weak { ptr: self.ptr, nosend: marker::NoSend, noshare: marker::NoShare }
         }
     }
 }
@@ -196,40 +198,30 @@ mod tests {
     fn test_clone() {
         let x = Rc::new(RefCell::new(5));
         let y = x.clone();
-        x.borrow().with_mut(|inner| {
+        x.deref().with_mut(|inner| {
             *inner = 20;
         });
-        assert_eq!(y.borrow().with(|v| *v), 20);
-    }
-
-    #[test]
-    fn test_deep_clone() {
-        let x = Rc::new(RefCell::new(5));
-        let y = x.deep_clone();
-        x.borrow().with_mut(|inner| {
-            *inner = 20;
-        });
-        assert_eq!(y.borrow().with(|v| *v), 5);
+        assert_eq!(y.deref().with(|v| *v), 20);
     }
 
     #[test]
     fn test_simple() {
         let x = Rc::new(5);
-        assert_eq!(*x.borrow(), 5);
+        assert_eq!(*x.deref(), 5);
     }
 
     #[test]
     fn test_simple_clone() {
         let x = Rc::new(5);
         let y = x.clone();
-        assert_eq!(*x.borrow(), 5);
-        assert_eq!(*y.borrow(), 5);
+        assert_eq!(*x.deref(), 5);
+        assert_eq!(*y.deref(), 5);
     }
 
     #[test]
     fn test_destructor() {
         let x = Rc::new(~5);
-        assert_eq!(**x.borrow(), 5);
+        assert_eq!(**x.deref(), 5);
     }
 
     #[test]
@@ -252,7 +244,7 @@ mod tests {
         // see issue #11532
         use gc::Gc;
         let a = Rc::new(RefCell::new(Gc::new(1)));
-        assert!(a.borrow().try_borrow_mut().is_some());
+        assert!(a.deref().try_borrow_mut().is_some());
     }
 
     #[test]
@@ -263,7 +255,7 @@ mod tests {
 
         let a = Rc::new(Cycle { x: RefCell::new(None) });
         let b = a.clone().downgrade();
-        *a.borrow().x.borrow_mut().get() = Some(b);
+        *a.deref().x.borrow_mut().get() = Some(b);
 
         // hopefully we don't double-free (or leak)...
     }

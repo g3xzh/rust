@@ -44,8 +44,9 @@ pub mod bench {
     extern crate test;
     use self::test::BenchHarness;
     use std::container::MutableMap;
-    use std::{vec, rand};
-    use std::rand::Rng;
+    use std::slice;
+    use rand;
+    use rand::Rng;
 
     pub fn insert_rand_n<M:MutableMap<uint,uint>>(n: uint,
                                                   map: &mut M,
@@ -89,7 +90,7 @@ pub mod bench {
                                                 bh: &mut BenchHarness) {
         // setup
         let mut rng = rand::XorShiftRng::new();
-        let mut keys = vec::from_fn(n, |_| rng.gen::<uint>() % n);
+        let mut keys = slice::from_fn(n, |_| rng.gen::<uint>() % n);
 
         for k in keys.iter() {
             map.insert(*k, 1);

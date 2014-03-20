@@ -20,7 +20,7 @@ use syntax::visit;
 use syntax::visit::Visitor;
 
 struct EntryContext<'a> {
-    session: Session,
+    session: &'a Session,
 
     ast_map: &'a ast_map::Map,
 
@@ -38,7 +38,7 @@ struct EntryContext<'a> {
 
     // The functions that one might think are 'main' but aren't, e.g.
     // main functions not defined at the top level. For diagnostics.
-    non_main_fns: ~[(NodeId, Span)],
+    non_main_fns: Vec<(NodeId, Span)> ,
 }
 
 impl<'a> Visitor<()> for EntryContext<'a> {
@@ -47,14 +47,14 @@ impl<'a> Visitor<()> for EntryContext<'a> {
     }
 }
 
-pub fn find_entry_point(session: Session, krate: &Crate, ast_map: &ast_map::Map) {
+pub fn find_entry_point(session: &Session, krate: &Crate, ast_map: &ast_map::Map) {
     if session.building_library.get() {
         // No need to find a main function
         return;
     }
 
     // If the user wants no main function at all, then stop here.
-    if attr::contains_name(krate.attrs, "no_main") {
+    if attr::contains_name(krate.attrs.as_slice(), "no_main") {
         session.entry_type.set(Some(session::EntryNone));
         return
     }
@@ -66,7 +66,7 @@ pub fn find_entry_point(session: Session, krate: &Crate, ast_map: &ast_map::Map)
         main_fn: None,
         attr_main_fn: None,
         start_fn: None,
-        non_main_fns: ~[],
+        non_main_fns: Vec::new(),
     };
 
     visit::walk_crate(&mut ctxt, krate, ());
@@ -95,7 +95,7 @@ fn find_item(item: &Item, ctxt: &mut EntryContext) {
                 });
             }
 
-            if attr::contains_name(item.attrs, "main") {
+            if attr::contains_name(item.attrs.as_slice(), "main") {
                 if ctxt.attr_main_fn.is_none() {
                     ctxt.attr_main_fn = Some((item.id, item.span));
                 } else {
@@ -105,7 +105,7 @@ fn find_item(item: &Item, ctxt: &mut EntryContext) {
                 }
             }
 
-            if attr::contains_name(item.attrs, "start") {
+            if attr::contains_name(item.attrs.as_slice(), "start") {
                 if ctxt.start_fn.is_none() {
                     ctxt.start_fn = Some((item.id, item.span));
                 } else {

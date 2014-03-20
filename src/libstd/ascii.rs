@@ -10,7 +10,7 @@
 
 //! Operations on ASCII strings and characters
 
-use to_str::{ToStr, IntoStr};
+use to_str::{IntoStr};
 use str;
 use str::Str;
 use str::StrSlice;
@@ -19,12 +19,12 @@ use container::Container;
 use cast;
 use fmt;
 use iter::Iterator;
-use vec::{ImmutableVector, MutableVector, Vector};
-use to_bytes::IterBytes;
+use slice::{ImmutableVector, MutableVector, Vector};
+use vec::Vec;
 use option::{Option, Some, None};
 
 /// Datatype to hold one ascii character. It wraps a `u8`, with the highest bit always zero.
-#[deriving(Clone, Eq, Ord, TotalOrd, TotalEq)]
+#[deriving(Clone, Eq, Ord, TotalOrd, TotalEq, Hash)]
 pub struct Ascii { priv chr: u8 }
 
 impl Ascii {
@@ -124,14 +124,6 @@ impl Ascii {
     #[inline]
     pub fn is_hex(&self) -> bool {
         self.is_digit() || ((self.chr | 32u8) - 'a' as u8) < 6
-    }
-}
-
-impl ToStr for Ascii {
-    #[inline]
-    fn to_str(&self) -> ~str {
-        // self.chr is always a valid utf8 byte, no need for the check
-        unsafe { str::raw::from_byte(self.chr) }
     }
 }
 
@@ -314,10 +306,11 @@ impl IntoStr for ~[Ascii] {
     }
 }
 
-impl IterBytes for Ascii {
+impl IntoStr for Vec<Ascii> {
     #[inline]
-    fn iter_bytes(&self, _lsb0: bool, f: |buf: &[u8]| -> bool) -> bool {
-        f([self.to_byte()])
+    fn into_str(self) -> ~str {
+        let v: ~[Ascii] = self.move_iter().collect();
+        unsafe { cast::transmute(v) }
     }
 }
 
@@ -489,11 +482,16 @@ mod tests {
     use super::*;
     use str::from_char;
     use char::from_u32;
+    use vec::Vec;
 
     macro_rules! v2ascii (
-        ( [$($e:expr),*]) => ( [$(Ascii{chr:$e}),*]);
+        ( [$($e:expr),*]) => (&[$(Ascii{chr:$e}),*]);
         (&[$($e:expr),*]) => (&[$(Ascii{chr:$e}),*]);
         (~[$($e:expr),*]) => (~[$(Ascii{chr:$e}),*]);
+    )
+
+    macro_rules! vec2ascii (
+        ($($e:expr),*) => (Vec::from_slice([$(Ascii{chr:$e}),*]));
     )
 
     #[test]
@@ -552,6 +550,17 @@ mod tests {
     }
 
     #[test]
+    fn test_ascii_vec_ng() {
+        assert_eq!(Vec::from_slice("abCDef&?#".to_ascii().to_lower()).into_str(), ~"abcdef&?#");
+        assert_eq!(Vec::from_slice("abCDef&?#".to_ascii().to_upper()).into_str(), ~"ABCDEF&?#");
+
+        assert_eq!(Vec::from_slice("".to_ascii().to_lower()).into_str(), ~"");
+        assert_eq!(Vec::from_slice("YMCA".to_ascii().to_lower()).into_str(), ~"ymca");
+        assert_eq!(Vec::from_slice("abcDEFxyz:.;".to_ascii().to_upper()).into_str(),
+                   ~"ABCDEFXYZ:.;");
+    }
+
+    #[test]
     fn test_owned_ascii_vec() {
         assert_eq!((~"( ;").into_ascii(), v2ascii!(~[40, 32, 59]));
         assert_eq!((~[40u8, 32u8, 59u8]).into_ascii(), v2ascii!(~[40, 32, 59]));
@@ -566,6 +575,7 @@ mod tests {
     #[test]
     fn test_ascii_into_str() {
         assert_eq!(v2ascii!(~[40, 32, 59]).into_str(), ~"( ;");
+        assert_eq!(vec2ascii!(40, 32, 59).into_str(), ~"( ;");
     }
 
     #[test]

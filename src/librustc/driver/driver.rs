@@ -11,8 +11,9 @@
 
 use back::link;
 use back::{arm, x86, x86_64, mips};
-use driver::session::{Aggressive, CrateTypeExecutable};
-use driver::session::{Session, Session_, No, Less, Default};
+use driver::session::{Aggressive, CrateTypeExecutable, CrateType,
+                      FullDebugInfo, LimitedDebugInfo, NoDebugInfo};
+use driver::session::{Session, No, Less, Default};
 use driver::session;
 use front;
 use lib::llvm::llvm;
@@ -26,17 +27,17 @@ use middle::{trans, freevars, kind, ty, typeck, lint, astencode, reachable};
 use middle;
 use util::common::time;
 use util::ppaux;
+use util::nodemap::{NodeMap, NodeSet};
 
-use extra::json;
-use serialize::Encodable;
+use serialize::{json, Encodable};
 
 use std::cell::{Cell, RefCell};
 use std::io;
 use std::io::fs;
 use std::io::MemReader;
+use std::mem::drop;
 use std::os;
 use std::vec;
-use collections::{HashMap, HashSet};
 use getopts::{optopt, optmulti, optflag, optflagopt};
 use getopts;
 use syntax::ast;
@@ -44,6 +45,7 @@ use syntax::abi;
 use syntax::attr;
 use syntax::attr::{AttrMetaMethods};
 use syntax::codemap;
+use syntax::crateid::CrateId;
 use syntax::diagnostic;
 use syntax::diagnostic::Emitter;
 use syntax::ext::base::CrateLoader;
@@ -71,13 +73,13 @@ pub fn anon_src() -> ~str {
 
 pub fn source_name(input: &Input) -> ~str {
     match *input {
-      // FIXME (#9639): This needs to handle non-utf8 paths
-      FileInput(ref ifile) => ifile.as_str().unwrap().to_str(),
-      StrInput(_) => anon_src()
+        // FIXME (#9639): This needs to handle non-utf8 paths
+        FileInput(ref ifile) => ifile.as_str().unwrap().to_str(),
+        StrInput(_) => anon_src()
     }
 }
 
-pub fn default_configuration(sess: Session) ->
+pub fn default_configuration(sess: &Session) ->
    ast::CrateConfig {
     let tos = match sess.targ_cfg.os {
         abi::OsWin32 =>   InternedString::new("win32"),
@@ -102,15 +104,15 @@ pub fn default_configuration(sess: Session) ->
     };
 
     let mk = attr::mk_name_value_item_str;
-    return ~[ // Target bindings.
+    return vec!(// Target bindings.
          attr::mk_word_item(fam.clone()),
          mk(InternedString::new("target_os"), tos),
          mk(InternedString::new("target_family"), fam),
          mk(InternedString::new("target_arch"), InternedString::new(arch)),
          mk(InternedString::new("target_endian"), InternedString::new(end)),
          mk(InternedString::new("target_word_size"),
-            InternedString::new(wordsz)),
-    ];
+            InternedString::new(wordsz))
+    );
 }
 
 pub fn append_configuration(cfg: &mut ast::CrateConfig,
@@ -120,8 +122,7 @@ pub fn append_configuration(cfg: &mut ast::CrateConfig,
     }
 }
 
-pub fn build_configuration(sess: Session) ->
-   ast::CrateConfig {
+pub fn build_configuration(sess: &Session) -> ast::CrateConfig {
     // Combine the configuration requested by the session (command line) with
     // some default and generated configuration items
     let default_cfg = default_configuration(sess);
@@ -136,15 +137,18 @@ pub fn build_configuration(sess: Session) ->
     } else {
         InternedString::new("nogc")
     });
-    return vec::append(user_cfg, default_cfg);
+    return vec::append(user_cfg.move_iter().collect(),
+                          default_cfg.as_slice());
 }
 
 // Convert strings provided as --cfg [cfgspec] into a crate_cfg
-fn parse_cfgspecs(cfgspecs: ~[~str])
+fn parse_cfgspecs(cfgspecs: Vec<~str> )
                   -> ast::CrateConfig {
     cfgspecs.move_iter().map(|s| {
-        let sess = parse::new_parse_sess();
-        parse::parse_meta_from_source_str("cfgspec".to_str(), s, ~[], sess)
+        parse::parse_meta_from_source_str("cfgspec".to_str(),
+                                          s,
+                                          Vec::new(),
+                                          &parse::new_parse_sess())
     }).collect::<ast::CrateConfig>()
 }
 
@@ -155,26 +159,39 @@ pub enum Input {
     StrInput(~str)
 }
 
-pub fn phase_1_parse_input(sess: Session, cfg: ast::CrateConfig, input: &Input)
+impl Input {
+    fn filestem(&self) -> ~str {
+        match *self {
+            FileInput(ref ifile) => ifile.filestem_str().unwrap().to_str(),
+            StrInput(_) => ~"rust_out",
+        }
+    }
+}
+
+pub fn phase_1_parse_input(sess: &Session, cfg: ast::CrateConfig, input: &Input)
     -> ast::Crate {
     let krate = time(sess.time_passes(), "parsing", (), |_| {
         match *input {
             FileInput(ref file) => {
-                parse::parse_crate_from_file(&(*file), cfg.clone(), sess.parse_sess)
+                parse::parse_crate_from_file(&(*file), cfg.clone(), &sess.parse_sess)
             }
             StrInput(ref src) => {
                 parse::parse_crate_from_source_str(anon_src(),
                                                    (*src).clone(),
                                                    cfg.clone(),
-                                                   sess.parse_sess)
+                                                   &sess.parse_sess)
             }
         }
     });
 
     if sess.opts.debugging_opts & session::AST_JSON_NOEXPAND != 0 {
-        let mut stdout = io::stdout();
+        let mut stdout = io::BufferedWriter::new(io::stdout());
         let mut json = json::PrettyEncoder::new(&mut stdout);
         krate.encode(&mut json);
+    }
+
+    if sess.show_span() {
+        front::show_span::run(sess, &krate);
     }
 
     krate
@@ -187,14 +204,17 @@ pub fn phase_1_parse_input(sess: Session, cfg: ast::CrateConfig, input: &Input)
 /// syntax expansion, secondary `cfg` expansion, synthesis of a test
 /// harness if one is to be provided and injection of a dependency on the
 /// standard library and prelude.
-pub fn phase_2_configure_and_expand(sess: Session,
+pub fn phase_2_configure_and_expand(sess: &Session,
                                     loader: &mut CrateLoader,
-                                    mut krate: ast::Crate)
+                                    mut krate: ast::Crate,
+                                    crate_id: &CrateId)
                                     -> (ast::Crate, syntax::ast_map::Map) {
     let time_passes = sess.time_passes();
 
-    sess.building_library.set(session::building_library(sess.opts, &krate));
-    sess.crate_types.set(session::collect_crate_types(&sess, krate.attrs));
+    sess.building_library.set(session::building_library(&sess.opts, &krate));
+    sess.crate_types.set(session::collect_crate_types(sess,
+                                                      krate.attrs
+                                                           .as_slice()));
 
     time(time_passes, "gated feature checking", (), |_|
          front::feature_gate::check_crate(sess, &krate));
@@ -214,8 +234,13 @@ pub fn phase_2_configure_and_expand(sess: Session,
                  front::config::strip_unconfigured_items(krate));
 
     krate = time(time_passes, "expansion", krate, |krate| {
-        syntax::ext::expand::expand_crate(sess.parse_sess,
-                                          loader,
+        let cfg = syntax::ext::expand::ExpansionConfig {
+            loader: loader,
+            deriving_hash_type_parameter: sess.features.default_type_params.get(),
+            crate_id: crate_id.clone(),
+        };
+        syntax::ext::expand::expand_crate(&sess.parse_sess,
+                                          cfg,
                                           krate)
     });
     // dump the syntax-time crates
@@ -235,7 +260,7 @@ pub fn phase_2_configure_and_expand(sess: Session,
          front::assign_node_ids_and_map::assign_node_ids_and_map(sess, krate));
 
     if sess.opts.debugging_opts & session::AST_JSON != 0 {
-        let mut stdout = io::stdout();
+        let mut stdout = io::BufferedWriter::new(io::stdout());
         let mut json = json::PrettyEncoder::new(&mut stdout);
         krate.encode(&mut json);
     }
@@ -249,7 +274,7 @@ pub struct CrateAnalysis {
     public_items: middle::privacy::PublicItems,
     ty_cx: ty::ctxt,
     maps: astencode::Maps,
-    reachable: @RefCell<HashSet<ast::NodeId>>
+    reachable: NodeSet,
 }
 
 /// Run the resolution, typechecking, region checking and other
@@ -262,12 +287,12 @@ pub fn phase_3_run_analysis_passes(sess: Session,
     let time_passes = sess.time_passes();
 
     time(time_passes, "external crate/lib resolution", (), |_|
-         creader::read_crates(sess, krate,
+         creader::read_crates(&sess, krate,
                               session::sess_os_to_meta_os(sess.targ_cfg.os),
                               token::get_ident_interner()));
 
     let lang_items = time(time_passes, "language item collection", (), |_|
-                          middle::lang_items::collect_language_items(krate, sess));
+                          middle::lang_items::collect_language_items(krate, &sess));
 
     let middle::resolve::CrateMap {
         def_map: def_map,
@@ -277,90 +302,95 @@ pub fn phase_3_run_analysis_passes(sess: Session,
         last_private_map: last_private_map
     } =
         time(time_passes, "resolution", (), |_|
-             middle::resolve::resolve_crate(sess, lang_items, krate));
+             middle::resolve::resolve_crate(&sess, lang_items, krate));
+
+    // Discard MTWT tables that aren't required past resolution.
+    syntax::ext::mtwt::clear_tables();
 
     let named_region_map = time(time_passes, "lifetime resolution", (),
-                                |_| middle::resolve_lifetime::krate(sess, krate));
+                                |_| middle::resolve_lifetime::krate(&sess, krate));
 
     time(time_passes, "looking for entry point", (),
-         |_| middle::entry::find_entry_point(sess, krate, &ast_map));
+         |_| middle::entry::find_entry_point(&sess, krate, &ast_map));
 
     sess.macro_registrar_fn.with_mut(|r| *r =
         time(time_passes, "looking for macro registrar", (), |_|
             syntax::ext::registrar::find_macro_registrar(
-                sess.span_diagnostic, krate)));
+                sess.diagnostic(), krate)));
 
     let freevars = time(time_passes, "freevar finding", (), |_|
                         freevars::annotate_freevars(def_map, krate));
 
     let region_map = time(time_passes, "region resolution", (), |_|
-                          middle::region::resolve_crate(sess, krate));
+                          middle::region::resolve_crate(&sess, krate));
 
-    let ty_cx = ty::mk_ctxt(sess, def_map, named_region_map, ast_map, freevars,
-                            region_map, lang_items);
+    let ty_cx = ty::mk_ctxt(sess, def_map, named_region_map, ast_map,
+                            freevars, region_map, lang_items);
 
     // passes are timed inside typeck
-    let (method_map, vtable_map) = typeck::check_crate(ty_cx, trait_map, krate);
+    let (method_map, vtable_map) = typeck::check_crate(&ty_cx, trait_map, krate);
+
+    time(time_passes, "check static items", (), |_|
+         middle::check_static::check_crate(&ty_cx, krate));
 
     // These next two const passes can probably be merged
     time(time_passes, "const marking", (), |_|
-         middle::const_eval::process_crate(krate, ty_cx));
+         middle::const_eval::process_crate(krate, &ty_cx));
 
     time(time_passes, "const checking", (), |_|
-         middle::check_const::check_crate(sess, krate, def_map,
-                                          method_map, ty_cx));
+         middle::check_const::check_crate(krate, def_map, method_map, &ty_cx));
 
     let maps = (external_exports, last_private_map);
     let (exported_items, public_items) =
             time(time_passes, "privacy checking", maps, |(a, b)|
-                 middle::privacy::check_crate(ty_cx, &method_map, &exp_map2,
+                 middle::privacy::check_crate(&ty_cx, &method_map, &exp_map2,
                                               a, b, krate));
 
     time(time_passes, "effect checking", (), |_|
-         middle::effect::check_crate(ty_cx, method_map, krate));
+         middle::effect::check_crate(&ty_cx, method_map, krate));
 
     time(time_passes, "loop checking", (), |_|
-         middle::check_loop::check_crate(ty_cx, krate));
+         middle::check_loop::check_crate(&ty_cx, krate));
 
     let middle::moves::MoveMaps {moves_map, moved_variables_set,
                                  capture_map} =
         time(time_passes, "compute moves", (), |_|
-             middle::moves::compute_moves(ty_cx, method_map, krate));
+             middle::moves::compute_moves(&ty_cx, method_map, krate));
 
     time(time_passes, "match checking", (), |_|
-         middle::check_match::check_crate(ty_cx, method_map,
-                                          moves_map, krate));
+         middle::check_match::check_crate(&ty_cx, method_map,
+                                          &moves_map, krate));
 
     time(time_passes, "liveness checking", (), |_|
-         middle::liveness::check_crate(ty_cx, method_map,
-                                       capture_map, krate));
+         middle::liveness::check_crate(&ty_cx, method_map,
+                                       &capture_map, krate));
 
     let root_map =
         time(time_passes, "borrow checking", (), |_|
-             middle::borrowck::check_crate(ty_cx, method_map,
-                                           moves_map, moved_variables_set,
-                                           capture_map, krate));
+             middle::borrowck::check_crate(&ty_cx, method_map,
+                                           &moves_map, &moved_variables_set,
+                                           &capture_map, krate));
+
+    drop(moves_map);
+    drop(moved_variables_set);
 
     time(time_passes, "kind checking", (), |_|
-         kind::check_crate(ty_cx, method_map, krate));
+         kind::check_crate(&ty_cx, method_map, krate));
 
     let reachable_map =
         time(time_passes, "reachability checking", (), |_|
-             reachable::find_reachable(ty_cx, method_map, &exported_items));
+             reachable::find_reachable(&ty_cx, method_map, &exported_items));
 
-    {
-        let reachable_map = reachable_map.borrow();
-        time(time_passes, "death checking", (), |_| {
-             middle::dead::check_crate(ty_cx,
-                                       method_map,
-                                       &exported_items,
-                                       reachable_map.get(),
-                                       krate)
-        });
-    }
+    time(time_passes, "death checking", (), |_| {
+        middle::dead::check_crate(&ty_cx,
+                                  method_map,
+                                  &exported_items,
+                                  &reachable_map,
+                                  krate)
+    });
 
     time(time_passes, "lint checking", (), |_|
-         lint::check_crate(ty_cx, method_map, &exported_items, krate));
+         lint::check_crate(&ty_cx, method_map, &exported_items, krate));
 
     CrateAnalysis {
         exp_map2: exp_map2,
@@ -371,7 +401,7 @@ pub fn phase_3_run_analysis_passes(sess: Session,
             root_map: root_map,
             method_map: method_map,
             vtable_map: vtable_map,
-            capture_map: capture_map
+            capture_map: RefCell::new(capture_map)
         },
         reachable: reachable_map
     }
@@ -382,23 +412,25 @@ pub struct CrateTranslation {
     module: ModuleRef,
     metadata_module: ModuleRef,
     link: LinkMeta,
-    metadata: ~[u8],
-    reachable: ~[~str],
+    metadata: Vec<u8> ,
+    reachable: Vec<~str> ,
 }
 
 /// Run the translation phase to LLVM, after which the AST and analysis can
 /// be discarded.
-pub fn phase_4_translate_to_llvm(sess: Session,
-                                 krate: ast::Crate,
-                                 analysis: &CrateAnalysis,
-                                 outputs: &OutputFilenames) -> CrateTranslation {
-    time(sess.time_passes(), "translation", krate, |krate|
-         trans::base::trans_crate(sess, krate, analysis, outputs))
+pub fn phase_4_translate_to_llvm(krate: ast::Crate,
+                                 analysis: CrateAnalysis,
+                                 outputs: &OutputFilenames) -> (ty::ctxt, CrateTranslation) {
+    // Option dance to work around the lack of stack once closures.
+    let time_passes = analysis.ty_cx.sess.time_passes();
+    let mut analysis = Some(analysis);
+    time(time_passes, "translation", krate, |krate|
+         trans::base::trans_crate(krate, analysis.take_unwrap(), outputs))
 }
 
 /// Run LLVM itself, producing a bitcode file, assembly file or object file
 /// as a side effect.
-pub fn phase_5_run_llvm_passes(sess: Session,
+pub fn phase_5_run_llvm_passes(sess: &Session,
                                trans: &CrateTranslation,
                                outputs: &OutputFilenames) {
     if sess.opts.cg.no_integrated_as {
@@ -417,24 +449,24 @@ pub fn phase_5_run_llvm_passes(sess: Session,
         time(sess.time_passes(), "LLVM passes", (), |_|
             link::write::run_passes(sess,
                                     trans,
-                                    sess.opts.output_types,
+                                    sess.opts.output_types.as_slice(),
                                     outputs));
     }
 }
 
 /// Run the linker on any artifacts that resulted from the LLVM run.
 /// This should produce either a finished executable or library.
-pub fn phase_6_link_output(sess: Session,
+pub fn phase_6_link_output(sess: &Session,
                            trans: &CrateTranslation,
                            outputs: &OutputFilenames) {
     time(sess.time_passes(), "linking", (), |_|
          link::link_binary(sess,
                            trans,
                            outputs,
-                           &trans.link));
+                           &trans.link.crateid));
 }
 
-pub fn stop_after_phase_3(sess: Session) -> bool {
+pub fn stop_after_phase_3(sess: &Session) -> bool {
    if sess.opts.no_trans {
         debug!("invoked with --no-trans, returning early from compile_input");
         return true;
@@ -442,15 +474,18 @@ pub fn stop_after_phase_3(sess: Session) -> bool {
     return false;
 }
 
-pub fn stop_after_phase_1(sess: Session) -> bool {
+pub fn stop_after_phase_1(sess: &Session) -> bool {
     if sess.opts.parse_only {
         debug!("invoked with --parse-only, returning early from compile_input");
+        return true;
+    }
+    if sess.show_span() {
         return true;
     }
     return sess.opts.debugging_opts & session::AST_JSON_NOEXPAND != 0;
 }
 
-pub fn stop_after_phase_2(sess: Session) -> bool {
+pub fn stop_after_phase_2(sess: &Session) -> bool {
     if sess.opts.no_analysis {
         debug!("invoked with --no-analysis, returning early from compile_input");
         return true;
@@ -458,7 +493,7 @@ pub fn stop_after_phase_2(sess: Session) -> bool {
     return sess.opts.debugging_opts & session::AST_JSON != 0;
 }
 
-pub fn stop_after_phase_5(sess: Session) -> bool {
+pub fn stop_after_phase_5(sess: &Session) -> bool {
     if !sess.opts.output_types.iter().any(|&i| i == link::OutputTypeExe) {
         debug!("not building executable, returning early from compile_input");
         return true;
@@ -466,21 +501,20 @@ pub fn stop_after_phase_5(sess: Session) -> bool {
     return false;
 }
 
-fn write_out_deps(sess: Session,
+fn write_out_deps(sess: &Session,
                   input: &Input,
                   outputs: &OutputFilenames,
                   krate: &ast::Crate) -> io::IoResult<()> {
-    let lm = link::build_link_meta(krate.attrs, outputs,
-                                   &mut ::util::sha2::Sha256::new());
+    let id = link::find_crate_id(krate.attrs.as_slice(), outputs.out_filestem);
 
-    let mut out_filenames = ~[];
+    let mut out_filenames = Vec::new();
     for output_type in sess.opts.output_types.iter() {
         let file = outputs.path(*output_type);
         match *output_type {
             link::OutputTypeExe => {
                 let crate_types = sess.crate_types.borrow();
                 for output in crate_types.get().iter() {
-                    let p = link::filename_for_input(&sess, *output, &lm, &file);
+                    let p = link::filename_for_input(sess, *output, &id, &file);
                     out_filenames.push(p);
                 }
             }
@@ -508,19 +542,14 @@ fn write_out_deps(sess: Session,
 
     // Build a list of files used to compile the output and
     // write Makefile-compatible dependency rules
-    let files: ~[~str] = {
-        let files = sess.codemap.files.borrow();
-        files.get()
-             .iter()
-             .filter_map(|fmap| {
-                 if fmap.is_real_file() {
-                     Some(fmap.name.clone())
-                 } else {
-                     None
-                 }
-             })
-             .collect()
-    };
+    let files: Vec<~str> = sess.codemap().files.borrow().get()
+                               .iter().filter_map(|fmap| {
+                                    if fmap.deref().is_real_file() {
+                                        Some(fmap.deref().name.clone())
+                                    } else {
+                                        None
+                                    }
+                                }).collect();
     let mut file = try!(io::File::create(&deps_filename));
     for path in out_filenames.iter() {
         try!(write!(&mut file as &mut Writer,
@@ -534,65 +563,74 @@ pub fn compile_input(sess: Session, cfg: ast::CrateConfig, input: &Input,
     // We need nested scopes here, because the intermediate results can keep
     // large chunks of memory alive and we want to free them as soon as
     // possible to keep the peak memory usage low
-    let (outputs, trans) = {
-        let (expanded_crate, ast_map) = {
-            let krate = phase_1_parse_input(sess, cfg, input);
-            if sess.show_span() {
-                front::show_span::run(sess, &krate);
-                return;
-            }
-            if stop_after_phase_1(sess) { return; }
-            let loader = &mut Loader::new(sess);
-            phase_2_configure_and_expand(sess, loader, krate)
+    let (outputs, trans, sess) = {
+        let (outputs, expanded_crate, ast_map) = {
+            let krate = phase_1_parse_input(&sess, cfg, input);
+            if stop_after_phase_1(&sess) { return; }
+            let outputs = build_output_filenames(input,
+                                                 outdir,
+                                                 output,
+                                                 krate.attrs.as_slice(),
+                                                 &sess);
+            let loader = &mut Loader::new(&sess);
+            let id = link::find_crate_id(krate.attrs.as_slice(),
+                                         outputs.out_filestem);
+            let (expanded_crate, ast_map) = phase_2_configure_and_expand(&sess, loader,
+                                                                         krate, &id);
+            (outputs, expanded_crate, ast_map)
         };
-        let outputs = build_output_filenames(input, outdir, output,
-                                             expanded_crate.attrs, sess);
+        write_out_deps(&sess, input, &outputs, &expanded_crate).unwrap();
 
-        write_out_deps(sess, input, &outputs, &expanded_crate).unwrap();
-
-        if stop_after_phase_2(sess) { return; }
+        if stop_after_phase_2(&sess) { return; }
 
         let analysis = phase_3_run_analysis_passes(sess, &expanded_crate, ast_map);
-        if stop_after_phase_3(sess) { return; }
-        let trans = phase_4_translate_to_llvm(sess, expanded_crate,
-                                              &analysis, &outputs);
-        (outputs, trans)
+        if stop_after_phase_3(&analysis.ty_cx.sess) { return; }
+        let (tcx, trans) = phase_4_translate_to_llvm(expanded_crate,
+                                                     analysis, &outputs);
+
+        // Discard interned strings as they are no longer required.
+        token::get_ident_interner().clear();
+
+        (outputs, trans, tcx.sess)
     };
-    phase_5_run_llvm_passes(sess, &trans, &outputs);
-    if stop_after_phase_5(sess) { return; }
-    phase_6_link_output(sess, &trans, &outputs);
+    phase_5_run_llvm_passes(&sess, &trans, &outputs);
+    if stop_after_phase_5(&sess) { return; }
+    phase_6_link_output(&sess, &trans, &outputs);
 }
 
 struct IdentifiedAnnotation;
 
 impl pprust::PpAnn for IdentifiedAnnotation {
-    fn pre(&self, node: pprust::AnnNode) -> io::IoResult<()> {
+    fn pre(&self,
+           s: &mut pprust::State,
+           node: pprust::AnnNode) -> io::IoResult<()> {
         match node {
-            pprust::NodeExpr(s, _) => pprust::popen(s),
+            pprust::NodeExpr(_) => s.popen(),
             _ => Ok(())
         }
     }
-    fn post(&self, node: pprust::AnnNode) -> io::IoResult<()> {
+    fn post(&self,
+            s: &mut pprust::State,
+            node: pprust::AnnNode) -> io::IoResult<()> {
         match node {
-            pprust::NodeItem(s, item) => {
+            pprust::NodeItem(item) => {
                 try!(pp::space(&mut s.s));
-                try!(pprust::synth_comment(s, item.id.to_str()));
+                s.synth_comment(item.id.to_str())
             }
-            pprust::NodeBlock(s, blk) => {
+            pprust::NodeBlock(blk) => {
                 try!(pp::space(&mut s.s));
-                try!(pprust::synth_comment(s, ~"block " + blk.id.to_str()));
+                s.synth_comment(~"block " + blk.id.to_str())
             }
-            pprust::NodeExpr(s, expr) => {
+            pprust::NodeExpr(expr) => {
                 try!(pp::space(&mut s.s));
-                try!(pprust::synth_comment(s, expr.id.to_str()));
-                try!(pprust::pclose(s));
+                try!(s.synth_comment(expr.id.to_str()));
+                s.pclose()
             }
-            pprust::NodePat(s, pat) => {
+            pprust::NodePat(pat) => {
                 try!(pp::space(&mut s.s));
-                try!(pprust::synth_comment(s, ~"pat " + pat.id.to_str()));
+                s.synth_comment(~"pat " + pat.id.to_str())
             }
         }
-        Ok(())
     }
 }
 
@@ -601,26 +639,29 @@ struct TypedAnnotation {
 }
 
 impl pprust::PpAnn for TypedAnnotation {
-    fn pre(&self, node: pprust::AnnNode) -> io::IoResult<()> {
+    fn pre(&self,
+           s: &mut pprust::State,
+           node: pprust::AnnNode) -> io::IoResult<()> {
         match node {
-            pprust::NodeExpr(s, _) => pprust::popen(s),
+            pprust::NodeExpr(_) => s.popen(),
             _ => Ok(())
         }
     }
-    fn post(&self, node: pprust::AnnNode) -> io::IoResult<()> {
-        let tcx = self.analysis.ty_cx;
+    fn post(&self,
+            s: &mut pprust::State,
+            node: pprust::AnnNode) -> io::IoResult<()> {
+        let tcx = &self.analysis.ty_cx;
         match node {
-            pprust::NodeExpr(s, expr) => {
+            pprust::NodeExpr(expr) => {
                 try!(pp::space(&mut s.s));
                 try!(pp::word(&mut s.s, "as"));
                 try!(pp::space(&mut s.s));
                 try!(pp::word(&mut s.s,
                                 ppaux::ty_to_str(tcx, ty::expr_ty(tcx, expr))));
-                try!(pprust::pclose(s));
+                s.pclose()
             }
-            _ => ()
+            _ => Ok(())
         }
-        Ok(())
     }
 }
 
@@ -628,42 +669,61 @@ pub fn pretty_print_input(sess: Session,
                           cfg: ast::CrateConfig,
                           input: &Input,
                           ppm: PpMode) {
-    let krate = phase_1_parse_input(sess, cfg, input);
+    let krate = phase_1_parse_input(&sess, cfg, input);
+    let id = link::find_crate_id(krate.attrs.as_slice(), input.filestem());
 
     let (krate, ast_map, is_expanded) = match ppm {
         PpmExpanded | PpmExpandedIdentified | PpmTyped => {
-            let loader = &mut Loader::new(sess);
-            let (krate, ast_map) = phase_2_configure_and_expand(sess, loader, krate);
+            let loader = &mut Loader::new(&sess);
+            let (krate, ast_map) = phase_2_configure_and_expand(&sess, loader,
+                                                                krate, &id);
             (krate, Some(ast_map), true)
         }
         _ => (krate, None, false)
     };
 
-    let annotation = match ppm {
+    let src_name = source_name(input);
+    let src = sess.codemap().get_filemap(src_name).deref().src.as_bytes().to_owned();
+    let mut rdr = MemReader::new(src);
+
+    match ppm {
         PpmIdentified | PpmExpandedIdentified => {
-            ~IdentifiedAnnotation as ~pprust::PpAnn
+            pprust::print_crate(sess.codemap(),
+                                sess.diagnostic(),
+                                &krate,
+                                src_name,
+                                &mut rdr,
+                                ~io::stdout(),
+                                &IdentifiedAnnotation,
+                                is_expanded)
         }
         PpmTyped => {
             let ast_map = ast_map.expect("--pretty=typed missing ast_map");
             let analysis = phase_3_run_analysis_passes(sess, &krate, ast_map);
-            ~TypedAnnotation {
+            let annotation = TypedAnnotation {
                 analysis: analysis
-            } as ~pprust::PpAnn:
+            };
+            pprust::print_crate(annotation.analysis.ty_cx.sess.codemap(),
+                                annotation.analysis.ty_cx.sess.diagnostic(),
+                                &krate,
+                                src_name,
+                                &mut rdr,
+                                ~io::stdout(),
+                                &annotation,
+                                is_expanded)
         }
-        _ => ~pprust::NoAnn as ~pprust::PpAnn:,
-    };
+        _ => {
+            pprust::print_crate(sess.codemap(),
+                                sess.diagnostic(),
+                                &krate,
+                                src_name,
+                                &mut rdr,
+                                ~io::stdout(),
+                                &pprust::NoAnn,
+                                is_expanded)
+        }
+    }.unwrap()
 
-    let src = &sess.codemap.get_filemap(source_name(input)).src;
-    let mut rdr = MemReader::new(src.as_bytes().to_owned());
-    let stdout = io::stdout();
-    pprust::print_crate(sess.codemap,
-                        sess.span_diagnostic,
-                        &krate,
-                        source_name(input),
-                        &mut rdr,
-                        ~stdout as ~io::Writer,
-                        annotation,
-                        is_expanded).unwrap();
 }
 
 pub fn get_os(triple: &str) -> Option<abi::Os> {
@@ -701,8 +761,7 @@ static architecture_abis : &'static [(&'static str, abi::Architecture)] = &'stat
 
     ("mips",   abi::Mips)];
 
-pub fn build_target_config(sopts: @session::Options)
-                           -> @session::Config {
+pub fn build_target_config(sopts: &session::Options) -> session::Config {
     let os = match get_os(sopts.target_triple) {
       Some(os) => os,
       None => early_error("unknown operating system")
@@ -724,14 +783,13 @@ pub fn build_target_config(sopts: @session::Options)
       abi::Arm => arm::get_target_strs(target_triple, os),
       abi::Mips => mips::get_target_strs(target_triple, os)
     };
-    let target_cfg = @session::Config {
+    session::Config {
         os: os,
         arch: arch,
         target_strs: target_strs,
         int_type: int_type,
         uint_type: uint_type,
-    };
-    return target_cfg;
+    }
 }
 
 pub fn host_triple() -> ~str {
@@ -746,20 +804,22 @@ pub fn host_triple() -> ~str {
     (env!("CFG_COMPILER")).to_owned()
 }
 
-pub fn build_session_options(matches: &getopts::Matches)
-                             -> @session::Options {
-    let crate_types = matches.opt_strs("crate-type").flat_map(|s| {
-        s.split(',').map(|part| {
-            match part {
+pub fn build_session_options(matches: &getopts::Matches) -> session::Options {
+    let mut crate_types: Vec<CrateType> = Vec::new();
+    let unparsed_crate_types = matches.opt_strs("crate-type");
+    for unparsed_crate_type in unparsed_crate_types.iter() {
+        for part in unparsed_crate_type.split(',') {
+            let new_part = match part {
                 "lib"       => session::default_lib_output(),
                 "rlib"      => session::CrateTypeRlib,
                 "staticlib" => session::CrateTypeStaticlib,
                 "dylib"     => session::CrateTypeDylib,
                 "bin"       => session::CrateTypeExecutable,
                 _ => early_error(format!("unknown crate type: `{}`", part))
-            }
-        }).collect()
-    });
+            };
+            crate_types.push(new_part)
+        }
+    }
 
     let parse_only = matches.opt_present("parse-only");
     let no_trans = matches.opt_present("no-trans");
@@ -767,15 +827,17 @@ pub fn build_session_options(matches: &getopts::Matches)
 
     let lint_levels = [lint::allow, lint::warn,
                        lint::deny, lint::forbid];
-    let mut lint_opts = ~[];
+    let mut lint_opts = Vec::new();
     let lint_dict = lint::get_lint_dict();
     for level in lint_levels.iter() {
         let level_name = lint::level_to_str(*level);
 
         let level_short = level_name.slice_chars(0, 1);
         let level_short = level_short.to_ascii().to_upper().into_str();
-        let flags = vec::append(matches.opt_strs(level_short),
-                                matches.opt_strs(level_name));
+        let flags = vec::append(matches.opt_strs(level_short)
+                                          .move_iter()
+                                          .collect(),
+                                   matches.opt_strs(level_name));
         for lint_name in flags.iter() {
             let lint_name = lint_name.replace("-", "_");
             match lint_dict.find_equiv(&lint_name) {
@@ -809,29 +871,30 @@ pub fn build_session_options(matches: &getopts::Matches)
         unsafe { llvm::LLVMSetDebug(1); }
     }
 
-    let mut output_types = if parse_only || no_trans {
-        ~[]
-    } else {
-        matches.opt_strs("emit").flat_map(|s| {
-            s.split(',').map(|part| {
-                match part.as_slice() {
+    let mut output_types = Vec::new();
+    if !parse_only && !no_trans {
+        let unparsed_output_types = matches.opt_strs("emit");
+        for unparsed_output_type in unparsed_output_types.iter() {
+            for part in unparsed_output_type.split(',') {
+                let output_type = match part.as_slice() {
                     "asm"  => link::OutputTypeAssembly,
                     "ir"   => link::OutputTypeLlvmAssembly,
                     "bc"   => link::OutputTypeBitcode,
                     "obj"  => link::OutputTypeObject,
                     "link" => link::OutputTypeExe,
                     _ => early_error(format!("unknown emission type: `{}`", part))
-                }
-            }).collect()
-        })
+                };
+                output_types.push(output_type)
+            }
+        }
     };
-    output_types.sort();
+    output_types.as_mut_slice().sort();
     output_types.dedup();
     if output_types.len() == 0 {
         output_types.push(link::OutputTypeExe);
     }
 
-    let sysroot_opt = matches.opt_str("sysroot").map(|m| @Path::new(m));
+    let sysroot_opt = matches.opt_str("sysroot").map(|m| Path::new(m));
     let target = matches.opt_str("target").unwrap_or(host_triple());
     let opt_level = {
         if (debugging_opts & session::NO_OPT) != 0 {
@@ -842,25 +905,47 @@ pub fn build_session_options(matches: &getopts::Matches)
             }
             Default
         } else if matches.opt_present("opt-level") {
-            match matches.opt_str("opt-level").unwrap() {
-              ~"0" => No,
-              ~"1" => Less,
-              ~"2" => Default,
-              ~"3" => Aggressive,
-              _ => {
-                early_error("optimization level needs to be between 0-3")
-              }
+            match matches.opt_str("opt-level").as_ref().map(|s| s.as_slice()) {
+                None      |
+                Some("0") => No,
+                Some("1") => Less,
+                Some("2") => Default,
+                Some("3") => Aggressive,
+                Some(arg) => {
+                    early_error(format!("optimization level needs to be between 0-3 \
+                                        (instead was `{}`)", arg));
+                }
             }
-        } else { No }
+        } else {
+            No
+        }
     };
     let gc = debugging_opts & session::GC != 0;
-    let debuginfo = matches.opt_present("g") || matches.opt_present("debuginfo");
+    let debuginfo = if matches.opt_present("g") {
+        if matches.opt_present("debuginfo") {
+            early_error("-g and --debuginfo both provided");
+        }
+        FullDebugInfo
+    } else if matches.opt_present("debuginfo") {
+        match matches.opt_str("debuginfo").as_ref().map(|s| s.as_slice()) {
+            Some("0") => NoDebugInfo,
+            Some("1") => LimitedDebugInfo,
+            None      |
+            Some("2") => FullDebugInfo,
+            Some(arg) => {
+                early_error(format!("optimization level needs to be between 0-3 \
+                                    (instead was `{}`)", arg));
+            }
+        }
+    } else {
+        NoDebugInfo
+    };
 
     let addl_lib_search_paths = matches.opt_strs("L").map(|s| {
         Path::new(s.as_slice())
     }).move_iter().collect();
 
-    let cfg = parse_cfgspecs(matches.opt_strs("cfg"));
+    let cfg = parse_cfgspecs(matches.opt_strs("cfg").move_iter().collect());
     let test = matches.opt_present("test");
     let write_dependency_info = (matches.opt_present("dep-info"),
                                  matches.opt_str("dep-info").map(|p| Path::new(p)));
@@ -870,14 +955,14 @@ pub fn build_session_options(matches: &getopts::Matches)
                        matches.opt_present("crate-file-name"));
     let cg = build_codegen_options(matches);
 
-    let sopts = @session::Options {
+    session::Options {
         crate_types: crate_types,
         gc: gc,
         optimize: opt_level,
         debuginfo: debuginfo,
         lint_opts: lint_opts,
         output_types: output_types,
-        addl_lib_search_paths: @RefCell::new(addl_lib_search_paths),
+        addl_lib_search_paths: RefCell::new(addl_lib_search_paths),
         maybe_sysroot: sysroot_opt,
         target_triple: target,
         cfg: cfg,
@@ -889,8 +974,7 @@ pub fn build_session_options(matches: &getopts::Matches)
         write_dependency_info: write_dependency_info,
         print_metas: print_metas,
         cg: cg,
-    };
-    return sopts;
+    }
 }
 
 pub fn build_codegen_options(matches: &getopts::Matches)
@@ -924,30 +1008,28 @@ pub fn build_codegen_options(matches: &getopts::Matches)
     return cg;
 }
 
-pub fn build_session(sopts: @session::Options,
+pub fn build_session(sopts: session::Options,
                      local_crate_source_file: Option<Path>)
                      -> Session {
-    let codemap = @codemap::CodeMap::new();
+    let codemap = codemap::CodeMap::new();
     let diagnostic_handler =
-        diagnostic::mk_handler();
+        diagnostic::default_handler();
     let span_diagnostic_handler =
         diagnostic::mk_span_handler(diagnostic_handler, codemap);
 
-    build_session_(sopts, local_crate_source_file, codemap, span_diagnostic_handler)
+    build_session_(sopts, local_crate_source_file, span_diagnostic_handler)
 }
 
-pub fn build_session_(sopts: @session::Options,
+pub fn build_session_(sopts: session::Options,
                       local_crate_source_file: Option<Path>,
-                      codemap: @codemap::CodeMap,
-                      span_diagnostic_handler: @diagnostic::SpanHandler)
+                      span_diagnostic: diagnostic::SpanHandler)
                       -> Session {
-    let target_cfg = build_target_config(sopts);
-    let p_s = parse::new_parse_sess_special_handler(span_diagnostic_handler, codemap);
-    let cstore = @CStore::new(token::get_ident_interner());
-    let filesearch = @filesearch::FileSearch::new(
-        &sopts.maybe_sysroot,
-        sopts.target_triple,
-        sopts.addl_lib_search_paths);
+    let target_cfg = build_target_config(&sopts);
+    let p_s = parse::new_parse_sess_special_handler(span_diagnostic);
+    let default_sysroot = match sopts.maybe_sysroot {
+        Some(_) => None,
+        None => Some(filesearch::get_or_default_sysroot())
+    };
 
     // Make the path absolute, if necessary
     let local_crate_source_file = local_crate_source_file.map(|path|
@@ -958,28 +1040,28 @@ pub fn build_session_(sopts: @session::Options,
         }
     );
 
-    @Session_ {
+    Session {
         targ_cfg: target_cfg,
         opts: sopts,
-        cstore: cstore,
+        cstore: CStore::new(token::get_ident_interner()),
         parse_sess: p_s,
-        codemap: codemap,
         // For a library crate, this is always none
         entry_fn: RefCell::new(None),
         entry_type: Cell::new(None),
         macro_registrar_fn: RefCell::new(None),
-        span_diagnostic: span_diagnostic_handler,
-        filesearch: filesearch,
+        default_sysroot: default_sysroot,
         building_library: Cell::new(false),
         local_crate_source_file: local_crate_source_file,
         working_dir: os::getcwd(),
-        lints: RefCell::new(HashMap::new()),
+        lints: RefCell::new(NodeMap::new()),
         node_id: Cell::new(1),
-        crate_types: @RefCell::new(~[]),
+        crate_types: RefCell::new(Vec::new()),
+        features: front::feature_gate::Features::new(),
+        recursion_limit: Cell::new(64),
     }
 }
 
-pub fn parse_pretty(sess: Session, name: &str) -> PpMode {
+pub fn parse_pretty(sess: &Session, name: &str) -> PpMode {
     match name {
       &"normal" => PpmNormal,
       &"expanded" => PpmExpanded,
@@ -995,67 +1077,52 @@ pub fn parse_pretty(sess: Session, name: &str) -> PpMode {
 }
 
 // rustc command line options
-pub fn optgroups() -> ~[getopts::OptGroup] {
- ~[
+pub fn optgroups() -> Vec<getopts::OptGroup> {
+ vec!(
   optflag("h", "help", "Display this message"),
   optmulti("", "cfg", "Configure the compilation environment", "SPEC"),
   optmulti("L", "",   "Add a directory to the library search path", "PATH"),
-  optmulti("", "crate-type", "Comma separated list of types of crates for the \
-                              compiler to emit",
+  optmulti("", "crate-type", "Comma separated list of types of crates for the compiler to emit",
            "[bin|lib|rlib|dylib|staticlib]"),
-  optmulti("", "emit", "Comma separated list of types of output for the compiler
-                        to emit",
+  optmulti("", "emit", "Comma separated list of types of output for the compiler to emit",
            "[asm|bc|ir|obj|link]"),
   optflag("", "crate-id", "Output the crate id and exit"),
   optflag("", "crate-name", "Output the crate name and exit"),
   optflag("", "crate-file-name", "Output the file(s) that would be written if compilation \
           continued and exit"),
   optflag("",  "ls",  "List the symbols defined by a library crate"),
-  optflag("g",  "debuginfo",  "Emit DWARF debug info to the objects created"),
-  optflag("", "no-trans",
-                        "Run all passes except translation; no output"),
-  optflag("", "no-analysis",
-                        "Parse and expand the output, but run no analysis or produce \
-                        output"),
-  optflag("O", "",    "Equivalent to --opt-level=2"),
-  optopt("o", "",     "Write output to <filename>", "FILENAME"),
-  optopt("", "opt-level",
-                        "Optimize with possible levels 0-3", "LEVEL"),
-  optopt( "",  "out-dir",
-                        "Write output to compiler-chosen filename
-                          in <dir>", "DIR"),
-  optflag("", "parse-only",
-                        "Parse only; do not compile, assemble, or link"),
+  optflag("g",  "",  "Equivalent to --debuginfo=2"),
+  optopt("",  "debuginfo",  "Emit DWARF debug info to the objects created:
+         0 = no debug info,
+         1 = line-tables only (for stacktraces and breakpoints),
+         2 = full debug info with variable and type information (same as -g)", "LEVEL"),
+  optflag("", "no-trans", "Run all passes except translation; no output"),
+  optflag("", "no-analysis", "Parse and expand the output, but run no analysis or produce output"),
+  optflag("O", "", "Equivalent to --opt-level=2"),
+  optopt("o", "", "Write output to <filename>", "FILENAME"),
+  optopt("", "opt-level", "Optimize with possible levels 0-3", "LEVEL"),
+  optopt( "",  "out-dir", "Write output to compiler-chosen filename in <dir>", "DIR"),
+  optflag("", "parse-only", "Parse only; do not compile, assemble, or link"),
   optflagopt("", "pretty",
-                        "Pretty-print the input instead of compiling;
-                          valid types are: normal (un-annotated source),
-                          expanded (crates expanded),
-                          typed (crates expanded, with type annotations),
-                          or identified (fully parenthesized,
-                          AST nodes and blocks with IDs)", "TYPE"),
-  optflagopt("", "dep-info",
-                        "Output dependency info to <filename> after compiling", "FILENAME"),
-  optopt("", "sysroot",
-                        "Override the system root", "PATH"),
+             "Pretty-print the input instead of compiling;
+              valid types are: normal (un-annotated source),
+              expanded (crates expanded),
+              typed (crates expanded, with type annotations),
+              or identified (fully parenthesized,
+              AST nodes and blocks with IDs)", "TYPE"),
+  optflagopt("", "dep-info", "Output dependency info to <filename> after compiling", "FILENAME"),
+  optopt("", "sysroot", "Override the system root", "PATH"),
   optflag("", "test", "Build a test harness"),
-  optopt("", "target",
-                        "Target triple cpu-manufacturer-kernel[-os]
-                          to compile for (see chapter 3.4 of http://www.sourceware.org/autobook/
-                          for details)", "TRIPLE"),
-  optmulti("W", "warn",
-                        "Set lint warnings", "OPT"),
-  optmulti("A", "allow",
-                        "Set lint allowed", "OPT"),
-  optmulti("D", "deny",
-                        "Set lint denied", "OPT"),
-  optmulti("F", "forbid",
-                        "Set lint forbidden", "OPT"),
-  optmulti("C", "codegen",
-                        "Set a codegen option", "OPT[=VALUE]"),
-  optmulti("Z", "",   "Set internal debugging options", "FLAG"),
-  optflag( "v", "version",
-                        "Print version info and exit"),
- ]
+  optopt("", "target", "Target triple cpu-manufacturer-kernel[-os]
+                        to compile for (see chapter 3.4 of http://www.sourceware.org/autobook/
+                        for details)", "TRIPLE"),
+  optmulti("W", "warn", "Set lint warnings", "OPT"),
+  optmulti("A", "allow", "Set lint allowed", "OPT"),
+  optmulti("D", "deny", "Set lint denied", "OPT"),
+  optmulti("F", "forbid", "Set lint forbidden", "OPT"),
+  optmulti("C", "codegen", "Set a codegen option", "OPT[=VALUE]"),
+  optmulti("Z", "", "Set internal debugging options", "FLAG"),
+  optflag( "v", "version", "Print version info and exit"))
 }
 
 pub struct OutputFilenames {
@@ -1094,7 +1161,7 @@ pub fn build_output_filenames(input: &Input,
                               odir: &Option<Path>,
                               ofile: &Option<Path>,
                               attrs: &[ast::Attribute],
-                              sess: Session)
+                              sess: &Session)
                            -> OutputFilenames {
     match *ofile {
         None => {
@@ -1106,11 +1173,7 @@ pub fn build_output_filenames(input: &Input,
                 None => Path::new(".")
             };
 
-            let mut stem = match *input {
-                // FIXME (#9639): This needs to handle non-utf8 paths
-                FileInput(ref ifile) => ifile.filestem_str().unwrap().to_str(),
-                StrInput(_) => ~"rust_out"
-            };
+            let mut stem = input.filestem();
 
             // If a crateid is present, we use it as the link name
             let crateid = attr::find_crateid(attrs);
@@ -1146,11 +1209,12 @@ pub fn build_output_filenames(input: &Input,
 }
 
 pub fn early_error(msg: &str) -> ! {
-    diagnostic::DefaultEmitter.emit(None, msg, diagnostic::Fatal);
+    let mut emitter = diagnostic::EmitterWriter::stderr();
+    emitter.emit(None, msg, diagnostic::Fatal);
     fail!(diagnostic::FatalError);
 }
 
-pub fn list_metadata(sess: Session, path: &Path,
+pub fn list_metadata(sess: &Session, path: &Path,
                      out: &mut io::Writer) -> io::IoResult<()> {
     metadata::loader::list_file_metadata(
         session::sess_os_to_meta_os(sess.targ_cfg.os), path, out)
@@ -1170,14 +1234,14 @@ mod test {
     #[test]
     fn test_switch_implies_cfg_test() {
         let matches =
-            &match getopts([~"--test"], optgroups()) {
+            &match getopts([~"--test"], optgroups().as_slice()) {
               Ok(m) => m,
               Err(f) => fail!("test_switch_implies_cfg_test: {}", f.to_err_msg())
             };
         let sessopts = build_session_options(matches);
         let sess = build_session(sessopts, None);
-        let cfg = build_configuration(sess);
-        assert!((attr::contains_name(cfg, "test")));
+        let cfg = build_configuration(&sess);
+        assert!((attr::contains_name(cfg.as_slice(), "test")));
     }
 
     // When the user supplies --test and --cfg test, don't implicitly add
@@ -1185,7 +1249,8 @@ mod test {
     #[test]
     fn test_switch_implies_cfg_test_unless_cfg_test() {
         let matches =
-            &match getopts([~"--test", ~"--cfg=test"], optgroups()) {
+            &match getopts([~"--test", ~"--cfg=test"],
+                           optgroups().as_slice()) {
               Ok(m) => m,
               Err(f) => {
                 fail!("test_switch_implies_cfg_test_unless_cfg_test: {}",
@@ -1194,7 +1259,7 @@ mod test {
             };
         let sessopts = build_session_options(matches);
         let sess = build_session(sessopts, None);
-        let cfg = build_configuration(sess);
+        let cfg = build_configuration(&sess);
         let mut test_items = cfg.iter().filter(|m| m.name().equiv(&("test")));
         assert!(test_items.next().is_some());
         assert!(test_items.next().is_none());

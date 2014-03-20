@@ -13,8 +13,7 @@
 #[feature(globs)];
 #[allow(dead_assignment)];
 
-extern crate extra;
-use std::vec::*;
+use std::slice::*;
 
 pub fn main() {
     let mut v = from_elem(0u, 0);

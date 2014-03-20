@@ -17,11 +17,13 @@ getaddrinfo()
 
 */
 
+#[allow(missing_doc)];
+
 use io::IoResult;
 use io::net::ip::{SocketAddr, IpAddr};
 use option::{Option, Some, None};
 use rt::rtio::{IoFactory, LocalIo};
-use vec::ImmutableVector;
+use slice::ImmutableVector;
 
 /// Hints to the types of sockets that are desired when looking up hosts
 pub enum SocketType {

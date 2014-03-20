@@ -490,8 +490,8 @@ use repr;
 use result::{Ok, Err};
 use str::StrSlice;
 use str;
-use vec::ImmutableVector;
-use vec;
+use slice::ImmutableVector;
+use slice;
 
 pub use self::num::radix;
 pub use self::num::Radix;
@@ -520,7 +520,7 @@ pub struct Formatter<'a> {
 
     /// Output buffer.
     buf: &'a mut io::Writer,
-    priv curarg: vec::Items<'a, Argument<'a>>,
+    priv curarg: slice::Items<'a, Argument<'a>>,
     priv args: &'a [Argument<'a>],
 }
 
@@ -580,7 +580,7 @@ pub trait Unsigned { fn fmt(&self, &mut Formatter) -> Result; }
 /// Format trait for the `o` character
 #[allow(missing_doc)]
 pub trait Octal { fn fmt(&self, &mut Formatter) -> Result; }
-/// Format trait for the `b` character
+/// Format trait for the `t` character
 #[allow(missing_doc)]
 pub trait Binary { fn fmt(&self, &mut Formatter) -> Result; }
 /// Format trait for the `x` character
@@ -610,11 +610,6 @@ pub trait UpperExp { fn fmt(&self, &mut Formatter) -> Result; }
 
 // FIXME #11938 - UFCS would make us able call the above methods
 // directly Show::show(x, fmt).
-
-// FIXME(huonw's WIP): this is a intermediate state waiting for a
-// snapshot (at the time of writing we're at 2014-01-20 b6400f9), to
-// be able to make the `fmt` functions into normal methods and have
-// `format!()` still work.
 macro_rules! uniform_fn_call_workaround {
     ($( $name: ident, $trait_: ident; )*) => {
         $(
@@ -659,8 +654,8 @@ uniform_fn_call_workaround! {
 /// use std::fmt;
 /// use std::io;
 ///
-/// let w = &mut io::stdout() as &mut io::Writer;
-/// format_args!(|args| { fmt::write(w, args); }, "Hello, {}!", "world");
+/// let mut w = io::stdout();
+/// format_args!(|args| { fmt::write(&mut w, args); }, "Hello, {}!", "world");
 /// ```
 pub fn write(output: &mut io::Writer, args: &Arguments) -> Result {
     unsafe { write_unsafe(output, args.fmt, args.args) }
@@ -1059,6 +1054,16 @@ pub fn argumentuint<'a>(s: &'a uint) -> Argument<'a> {
 }
 
 // Implementations of the core formatting traits
+
+impl<T: Show> Show for @T {
+    fn fmt(&self, f: &mut Formatter) -> Result { secret_show(&**self, f) }
+}
+impl<T: Show> Show for ~T {
+    fn fmt(&self, f: &mut Formatter) -> Result { secret_show(&**self, f) }
+}
+impl<'a, T: Show> Show for &'a T {
+    fn fmt(&self, f: &mut Formatter) -> Result { secret_show(*self, f) }
+}
 
 impl Bool for bool {
     fn fmt(&self, f: &mut Formatter) -> Result {

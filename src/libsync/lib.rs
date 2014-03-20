@@ -16,11 +16,18 @@
 #[crate_type = "rlib"];
 #[crate_type = "dylib"];
 #[license = "MIT/ASL2"];
+#[doc(html_logo_url = "http://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
+      html_favicon_url = "http://www.rust-lang.org/favicon.ico",
+      html_root_url = "http://static.rust-lang.org/doc/master")];
+#[feature(phase)];
+#[allow(deprecated_owned_vector)]; // NOTE: remove after stage0
 
-pub use arc::{Arc, MutexArc, RWArc, RWWriteMode, RWReadMode, Condvar, CowArc};
+#[cfg(test)] #[phase(syntax, link)] extern crate log;
+
+pub use arc::{Arc, MutexArc, RWArc, RWWriteMode, RWReadMode, ArcCondvar, CowArc};
 pub use sync::{Mutex, RWLock, Condvar, Semaphore, RWLockWriteMode,
-    RWLockReadMode, Barrier, one, mutex};
-pub use comm::{DuplexStream, SyncChan, SyncPort, rendezvous};
+               RWLockReadMode, Barrier, one, mutex};
+pub use comm::{DuplexStream, SyncSender, SyncReceiver, rendezvous, duplex};
 pub use task_pool::TaskPool;
 pub use future::Future;
 

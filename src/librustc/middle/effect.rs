@@ -12,7 +12,7 @@
 /// `unsafe`.
 
 use middle::ty;
-use middle::typeck::method_map;
+use middle::typeck::{MethodCall, MethodMap};
 use util::ppaux;
 
 use syntax::ast;
@@ -35,16 +35,16 @@ fn type_is_unsafe_function(ty: ty::t) -> bool {
     }
 }
 
-struct EffectCheckVisitor {
-    tcx: ty::ctxt,
+struct EffectCheckVisitor<'a> {
+    tcx: &'a ty::ctxt,
 
     /// The method map.
-    method_map: method_map,
+    method_map: MethodMap,
     /// Whether we're in an unsafe context.
     unsafe_context: UnsafeContext,
 }
 
-impl EffectCheckVisitor {
+impl<'a> EffectCheckVisitor<'a> {
     fn require_unsafe(&mut self, span: Span, description: &str) {
         match self.unsafe_context {
             SafeContext => {
@@ -65,7 +65,7 @@ impl EffectCheckVisitor {
 
     fn check_str_index(&mut self, e: @ast::Expr) {
         let base_type = match e.node {
-            ast::ExprIndex(_, base, _) => ty::node_id_to_type(self.tcx, base.id),
+            ast::ExprIndex(base, _) => ty::node_id_to_type(self.tcx, base.id),
             _ => return
         };
         debug!("effect: checking index with base type {}",
@@ -80,7 +80,7 @@ impl EffectCheckVisitor {
     }
 }
 
-impl Visitor<()> for EffectCheckVisitor {
+impl<'a> Visitor<()> for EffectCheckVisitor<'a> {
     fn visit_fn(&mut self, fn_kind: &visit::FnKind, fn_decl: &ast::FnDecl,
                 block: &ast::Block, span: Span, node_id: ast::NodeId, _:()) {
 
@@ -137,8 +137,9 @@ impl Visitor<()> for EffectCheckVisitor {
 
     fn visit_expr(&mut self, expr: &ast::Expr, _:()) {
         match expr.node {
-            ast::ExprMethodCall(callee_id, _, _, _) => {
-                let base_type = ty::node_id_to_type(self.tcx, callee_id);
+            ast::ExprMethodCall(_, _, _) => {
+                let method_call = MethodCall::expr(expr.id);
+                let base_type = self.method_map.borrow().get().get(&method_call).ty;
                 debug!("effect: method call case, base type is {}",
                        ppaux::ty_to_str(self.tcx, base_type));
                 if type_is_unsafe_function(base_type) {
@@ -154,7 +155,7 @@ impl Visitor<()> for EffectCheckVisitor {
                     self.require_unsafe(expr.span, "call to unsafe function")
                 }
             }
-            ast::ExprUnary(_, ast::UnDeref, base) => {
+            ast::ExprUnary(ast::UnDeref, base) => {
                 let base_type = ty::node_id_to_type(self.tcx, base.id);
                 debug!("effect: unary case, base type is {}",
                         ppaux::ty_to_str(self.tcx, base_type));
@@ -166,7 +167,7 @@ impl Visitor<()> for EffectCheckVisitor {
                     _ => {}
                 }
             }
-            ast::ExprAssign(base, _) | ast::ExprAssignOp(_, _, base, _) => {
+            ast::ExprAssign(base, _) | ast::ExprAssignOp(_, base, _) => {
                 self.check_str_index(base);
             }
             ast::ExprAddrOf(ast::MutMutable, base) => {
@@ -190,9 +191,7 @@ impl Visitor<()> for EffectCheckVisitor {
     }
 }
 
-pub fn check_crate(tcx: ty::ctxt,
-                   method_map: method_map,
-                   krate: &ast::Crate) {
+pub fn check_crate(tcx: &ty::ctxt, method_map: MethodMap, krate: &ast::Crate) {
     let mut visitor = EffectCheckVisitor {
         tcx: tcx,
         method_map: method_map,

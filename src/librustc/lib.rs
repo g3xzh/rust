@@ -23,15 +23,15 @@ This API is completely unstable and subject to change.
 #[license = "MIT/ASL2"];
 #[crate_type = "dylib"];
 #[crate_type = "rlib"];
-#[doc(html_logo_url = "http://www.rust-lang.org/logos/rust-logo-128x128-blk.png",
+#[doc(html_logo_url = "http://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
       html_favicon_url = "http://www.rust-lang.org/favicon.ico",
       html_root_url = "http://static.rust-lang.org/doc/master")];
 
-#[feature(macro_rules, globs, struct_variant, managed_boxes)];
-#[allow(unknown_features)]; // Note: remove it after a snapshot.
-#[feature(quote)];
+#[allow(deprecated)];
+#[feature(macro_rules, globs, struct_variant, managed_boxes, quote,
+          default_type_params, phase)];
+#[allow(deprecated_owned_vector)]; // NOTE: remove after stage0
 
-extern crate extra;
 extern crate flate;
 extern crate arena;
 extern crate syntax;
@@ -40,6 +40,8 @@ extern crate sync;
 extern crate getopts;
 extern crate collections;
 extern crate time;
+#[phase(syntax, link)]
+extern crate log;
 
 use back::link;
 use driver::session;
@@ -47,6 +49,7 @@ use middle::lint;
 
 use d = driver::driver;
 
+use std::any::AnyRefExt;
 use std::cmp;
 use std::io;
 use std::os;
@@ -54,7 +57,6 @@ use std::str;
 use std::task;
 use std::vec;
 use syntax::ast;
-use syntax::attr;
 use syntax::diagnostic::Emitter;
 use syntax::diagnostic;
 use syntax::parse;
@@ -70,6 +72,7 @@ pub mod middle {
     pub mod check_loop;
     pub mod check_match;
     pub mod check_const;
+    pub mod check_static;
     pub mod lint;
     pub mod borrowck;
     pub mod dataflow;
@@ -102,16 +105,17 @@ pub mod front {
 }
 
 pub mod back {
-    pub mod archive;
-    pub mod link;
     pub mod abi;
+    pub mod archive;
     pub mod arm;
+    pub mod link;
+    pub mod lto;
     pub mod mips;
+    pub mod rpath;
+    pub mod svh;
+    pub mod target_strs;
     pub mod x86;
     pub mod x86_64;
-    pub mod rpath;
-    pub mod target_strs;
-    pub mod lto;
 }
 
 pub mod metadata;
@@ -122,12 +126,16 @@ pub mod util {
     pub mod common;
     pub mod ppaux;
     pub mod sha2;
+    pub mod nodemap;
 }
 
 pub mod lib {
     pub mod llvm;
     pub mod llvmdeps;
 }
+
+static BUG_REPORT_URL: &'static str =
+    "http://static.rust-lang.org/doc/master/complement-bugreport.html";
 
 pub fn version(argv0: &str) {
     let vers = match option_env!("CFG_VERSION") {
@@ -145,7 +153,7 @@ Additional help:
     -C help             Print codegen options
     -W help             Print 'lint' options and default settings
     -Z help             Print internal options for debugging rustc\n",
-              getopts::usage(message, d::optgroups()));
+              getopts::usage(message, d::optgroups().as_slice()));
 }
 
 pub fn describe_warnings() {
@@ -160,8 +168,8 @@ Available lint options:
     let lint_dict = lint::get_lint_dict();
     let mut lint_dict = lint_dict.move_iter()
                                  .map(|(k, v)| (v, k))
-                                 .collect::<~[(lint::LintSpec, &'static str)]>();
-    lint_dict.sort();
+                                 .collect::<Vec<(lint::LintSpec, &'static str)> >();
+    lint_dict.as_mut_slice().sort();
 
     let mut max_key = 0;
     for &(_, name) in lint_dict.iter() {
@@ -220,7 +228,7 @@ pub fn run_compiler(args: &[~str]) {
     if args.is_empty() { usage(binary); return; }
 
     let matches =
-        &match getopts::getopts(args, d::optgroups()) {
+        &match getopts::getopts(args, d::optgroups().as_slice()) {
           Ok(m) => m,
           Err(f) => {
             d::early_error(f.to_err_msg());
@@ -232,8 +240,10 @@ pub fn run_compiler(args: &[~str]) {
         return;
     }
 
-    let lint_flags = vec::append(matches.opt_strs("W"),
-                                 matches.opt_strs("warn"));
+    let lint_flags = vec::append(matches.opt_strs("W")
+                                           .move_iter()
+                                           .collect(),
+                                    matches.opt_strs("warn"));
     if lint_flags.iter().any(|x| x == &~"help") {
         describe_warnings();
         return;
@@ -279,59 +289,49 @@ pub fn run_compiler(args: &[~str]) {
     let sess = d::build_session(sopts, input_file_path);
     let odir = matches.opt_str("out-dir").map(|o| Path::new(o));
     let ofile = matches.opt_str("o").map(|o| Path::new(o));
-    let cfg = d::build_configuration(sess);
+    let cfg = d::build_configuration(&sess);
     let pretty = matches.opt_default("pretty", "normal").map(|a| {
-        d::parse_pretty(sess, a)
+        d::parse_pretty(&sess, a)
     });
     match pretty {
-      Some::<d::PpMode>(ppm) => {
-        d::pretty_print_input(sess, cfg, &input, ppm);
-        return;
-      }
-      None::<d::PpMode> => {/* continue */ }
+        Some::<d::PpMode>(ppm) => {
+            d::pretty_print_input(sess, cfg, &input, ppm);
+            return;
+        }
+        None::<d::PpMode> => {/* continue */ }
     }
     let ls = matches.opt_present("ls");
     if ls {
         match input {
-          d::FileInput(ref ifile) => {
-            let mut stdout = io::stdout();
-            d::list_metadata(sess, &(*ifile),
-                             &mut stdout as &mut io::Writer).unwrap();
-          }
-          d::StrInput(_) => {
-            d::early_error("can not list metadata for stdin");
-          }
+            d::FileInput(ref ifile) => {
+                let mut stdout = io::stdout();
+                d::list_metadata(&sess, &(*ifile), &mut stdout).unwrap();
+            }
+            d::StrInput(_) => {
+                d::early_error("can not list metadata for stdin");
+            }
         }
         return;
     }
-    let (crate_id, crate_name, crate_file_name) = sopts.print_metas;
+    let (crate_id, crate_name, crate_file_name) = sess.opts.print_metas;
     // these nasty nested conditions are to avoid doing extra work
     if crate_id || crate_name || crate_file_name {
-        let attrs = parse_crate_attrs(sess, &input);
+        let attrs = parse_crate_attrs(&sess, &input);
         let t_outputs = d::build_output_filenames(&input, &odir, &ofile,
-                                                  attrs, sess);
-        if crate_id || crate_name {
-            let crateid = match attr::find_crateid(attrs) {
-                Some(crateid) => crateid,
-                None => {
-                    sess.fatal("No crate_id and --crate-id or \
-                                --crate-name requested")
-                }
-            };
-            if crate_id {
-                println!("{}", crateid.to_str());
-            }
-            if crate_name {
-                println!("{}", crateid.name);
-            }
-        }
+                                                  attrs.as_slice(), &sess);
+        let id = link::find_crate_id(attrs.as_slice(), t_outputs.out_filestem);
 
+        if crate_id {
+            println!("{}", id.to_str());
+        }
+        if crate_name {
+            println!("{}", id.name);
+        }
         if crate_file_name {
-            let lm = link::build_link_meta(attrs, &t_outputs,
-                                           &mut ::util::sha2::Sha256::new());
-            let crate_types = session::collect_crate_types(&sess, attrs);
+            let crate_types = session::collect_crate_types(&sess,
+                                                           attrs.as_slice());
             for &style in crate_types.iter() {
-                let fname = link::filename_for_input(&sess, style, &lm,
+                let fname = link::filename_for_input(&sess, style, &id,
                                                      &t_outputs.with_extension(""));
                 println!("{}", fname.filename_display());
             }
@@ -343,19 +343,22 @@ pub fn run_compiler(args: &[~str]) {
     d::compile_input(sess, cfg, &input, &odir, &ofile);
 }
 
-fn parse_crate_attrs(sess: session::Session,
-                     input: &d::Input) -> ~[ast::Attribute] {
-    match *input {
+fn parse_crate_attrs(sess: &session::Session, input: &d::Input) ->
+                     Vec<ast::Attribute> {
+    let result = match *input {
         d::FileInput(ref ifile) => {
-            parse::parse_crate_attrs_from_file(ifile, ~[], sess.parse_sess)
+            parse::parse_crate_attrs_from_file(ifile,
+                                               Vec::new(),
+                                               &sess.parse_sess)
         }
         d::StrInput(ref src) => {
             parse::parse_crate_attrs_from_source_str(d::anon_src(),
                                                      (*src).clone(),
-                                                     ~[],
-                                                     sess.parse_sess)
+                                                     Vec::new(),
+                                                     &sess.parse_sess)
         }
-    }
+    };
+    result.move_iter().collect()
 }
 
 /// Run a procedure which will detect failures in the compiler and print nicer
@@ -380,9 +383,9 @@ pub fn monitor(f: proc()) {
         task_builder.opts.stack_size = Some(STACK_SIZE);
     }
 
-    let (p, c) = Chan::new();
-    let w = io::ChanWriter::new(c);
-    let mut r = io::PortReader::new(p);
+    let (tx, rx) = channel();
+    let w = io::ChanWriter::new(tx);
+    let mut r = io::ChanReader::new(rx);
 
     match task_builder.try(proc() {
         io::stdio::set_stderr(~w as ~io::Writer);
@@ -392,22 +395,32 @@ pub fn monitor(f: proc()) {
         Err(value) => {
             // Task failed without emitting a fatal diagnostic
             if !value.is::<diagnostic::FatalError>() {
-                diagnostic::DefaultEmitter.emit(
-                    None,
-                    diagnostic::ice_msg("unexpected failure"),
-                    diagnostic::Error);
+                let mut emitter = diagnostic::EmitterWriter::stderr();
 
-                let xs = [
-                    ~"the compiler hit an unexpected failure path. \
-                     this is a bug",
-                ];
-                for note in xs.iter() {
-                    diagnostic::DefaultEmitter.emit(None,
-                                                    *note,
-                                                    diagnostic::Note)
+                // a .span_bug or .bug call has already printed what
+                // it wants to print.
+                if !value.is::<diagnostic::ExplicitBug>() {
+                    emitter.emit(
+                        None,
+                        "unexpected failure",
+                        diagnostic::Bug);
                 }
 
-                println!("{}", r.read_to_str());
+                let xs = [
+                    ~"the compiler hit an unexpected failure path. this is a bug.",
+                    "we would appreciate a bug report: " + BUG_REPORT_URL,
+                    ~"run with `RUST_BACKTRACE=1` for a backtrace",
+                ];
+                for note in xs.iter() {
+                    emitter.emit(None, *note, diagnostic::Note)
+                }
+
+                match r.read_to_str() {
+                    Ok(s) => println!("{}", s),
+                    Err(e) => emitter.emit(None,
+                                           format!("failed to read internal stderr: {}", e),
+                                           diagnostic::Error),
+                }
             }
 
             // Fail so the process returns a failure code, but don't pollute the

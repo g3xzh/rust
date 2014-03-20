@@ -43,24 +43,22 @@ pub enum Visibility {
     ProtectedVisibility = 2,
 }
 
+// This enum omits the obsolete (and no-op) linkage types DLLImportLinkage,
+// DLLExportLinkage, GhostLinkage and LinkOnceODRAutoHideLinkage.
+// LinkerPrivateLinkage and LinkerPrivateWeakLinkage are not included either;
+// they've been removed in upstream LLVM commit r203866.
 pub enum Linkage {
     ExternalLinkage = 0,
     AvailableExternallyLinkage = 1,
     LinkOnceAnyLinkage = 2,
     LinkOnceODRLinkage = 3,
-    LinkOnceODRAutoHideLinkage = 4,
     WeakAnyLinkage = 5,
     WeakODRLinkage = 6,
     AppendingLinkage = 7,
     InternalLinkage = 8,
     PrivateLinkage = 9,
-    DLLImportLinkage = 10,
-    DLLExportLinkage = 11,
     ExternalWeakLinkage = 12,
-    GhostLinkage = 13,
     CommonLinkage = 14,
-    LinkerPrivateLinkage = 15,
-    LinkerPrivateWeakLinkage = 16,
 }
 
 #[deriving(Clone)]
@@ -1771,28 +1769,29 @@ pub mod llvm {
         pub fn LLVMRustDestroyArchive(AR: ArchiveRef);
 
         pub fn LLVMRustSetDLLExportStorageClass(V: ValueRef);
+        pub fn LLVMVersionMinor() -> c_int;
     }
 }
 
-pub fn SetInstructionCallConv(Instr: ValueRef, CC: CallConv) {
+pub fn SetInstructionCallConv(instr: ValueRef, cc: CallConv) {
     unsafe {
-        llvm::LLVMSetInstructionCallConv(Instr, CC as c_uint);
+        llvm::LLVMSetInstructionCallConv(instr, cc as c_uint);
     }
 }
-pub fn SetFunctionCallConv(Fn: ValueRef, CC: CallConv) {
+pub fn SetFunctionCallConv(fn_: ValueRef, cc: CallConv) {
     unsafe {
-        llvm::LLVMSetFunctionCallConv(Fn, CC as c_uint);
+        llvm::LLVMSetFunctionCallConv(fn_, cc as c_uint);
     }
 }
-pub fn SetLinkage(Global: ValueRef, Link: Linkage) {
+pub fn SetLinkage(global: ValueRef, link: Linkage) {
     unsafe {
-        llvm::LLVMSetLinkage(Global, Link as c_uint);
+        llvm::LLVMSetLinkage(global, link as c_uint);
     }
 }
 
-pub fn SetUnnamedAddr(Global: ValueRef, Unnamed: bool) {
+pub fn SetUnnamedAddr(global: ValueRef, unnamed: bool) {
     unsafe {
-        llvm::LLVMSetUnnamedAddr(Global, Unnamed as Bool);
+        llvm::LLVMSetUnnamedAddr(global, unnamed as Bool);
     }
 }
 
@@ -1802,20 +1801,20 @@ pub fn set_thread_local(global: ValueRef, is_thread_local: bool) {
     }
 }
 
-pub fn ConstICmp(Pred: IntPredicate, V1: ValueRef, V2: ValueRef) -> ValueRef {
+pub fn ConstICmp(pred: IntPredicate, v1: ValueRef, v2: ValueRef) -> ValueRef {
     unsafe {
-        llvm::LLVMConstICmp(Pred as c_ushort, V1, V2)
+        llvm::LLVMConstICmp(pred as c_ushort, v1, v2)
     }
 }
-pub fn ConstFCmp(Pred: RealPredicate, V1: ValueRef, V2: ValueRef) -> ValueRef {
+pub fn ConstFCmp(pred: RealPredicate, v1: ValueRef, v2: ValueRef) -> ValueRef {
     unsafe {
-        llvm::LLVMConstFCmp(Pred as c_ushort, V1, V2)
+        llvm::LLVMConstFCmp(pred as c_ushort, v1, v2)
     }
 }
 
-pub fn SetFunctionAttribute(Fn: ValueRef, attr: Attribute) {
+pub fn SetFunctionAttribute(fn_: ValueRef, attr: Attribute) {
     unsafe {
-        llvm::LLVMAddFunctionAttr(Fn, attr as c_uint)
+        llvm::LLVMAddFunctionAttr(fn_, attr as c_uint)
     }
 }
 /* Memory-managed object interface to type handles. */
@@ -1868,20 +1867,20 @@ impl TypeNames {
 /* Memory-managed interface to target data. */
 
 pub struct target_data_res {
-    TD: TargetDataRef,
+    td: TargetDataRef,
 }
 
 impl Drop for target_data_res {
     fn drop(&mut self) {
         unsafe {
-            llvm::LLVMDisposeTargetData(self.TD);
+            llvm::LLVMDisposeTargetData(self.td);
         }
     }
 }
 
-pub fn target_data_res(TD: TargetDataRef) -> target_data_res {
+pub fn target_data_res(td: TargetDataRef) -> target_data_res {
     target_data_res {
-        TD: TD
+        td: td
     }
 }
 
@@ -1904,20 +1903,20 @@ pub fn mk_target_data(string_rep: &str) -> TargetData {
 /* Memory-managed interface to pass managers. */
 
 pub struct pass_manager_res {
-    PM: PassManagerRef,
+    pm: PassManagerRef,
 }
 
 impl Drop for pass_manager_res {
     fn drop(&mut self) {
         unsafe {
-            llvm::LLVMDisposePassManager(self.PM);
+            llvm::LLVMDisposePassManager(self.pm);
         }
     }
 }
 
-pub fn pass_manager_res(PM: PassManagerRef) -> pass_manager_res {
+pub fn pass_manager_res(pm: PassManagerRef) -> pass_manager_res {
     pass_manager_res {
-        PM: PM
+        pm: pm
     }
 }
 
@@ -1971,20 +1970,20 @@ impl Drop for ObjectFile {
 /* Memory-managed interface to section iterators. */
 
 pub struct section_iter_res {
-    SI: SectionIteratorRef,
+    si: SectionIteratorRef,
 }
 
 impl Drop for section_iter_res {
     fn drop(&mut self) {
         unsafe {
-            llvm::LLVMDisposeSectionIterator(self.SI);
+            llvm::LLVMDisposeSectionIterator(self.si);
         }
     }
 }
 
-pub fn section_iter_res(SI: SectionIteratorRef) -> section_iter_res {
+pub fn section_iter_res(si: SectionIteratorRef) -> section_iter_res {
     section_iter_res {
-        SI: SI
+        si: si
     }
 }
 

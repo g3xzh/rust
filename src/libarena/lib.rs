@@ -19,13 +19,15 @@
 #[crate_type = "rlib"];
 #[crate_type = "dylib"];
 #[license = "MIT/ASL2"];
+#[doc(html_logo_url = "http://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
+      html_favicon_url = "http://www.rust-lang.org/favicon.ico",
+      html_root_url = "http://static.rust-lang.org/doc/master")];
 #[allow(missing_doc)];
 #[feature(managed_boxes)];
 
 extern crate collections;
 
 use collections::list::{List, Cons, Nil};
-use collections::list;
 
 use std::cast::{transmute, transmute_mut, transmute_mut_region};
 use std::cast;
@@ -39,12 +41,12 @@ use std::rc::Rc;
 use std::rt::global_heap;
 use std::intrinsics::{TyDesc, get_tydesc};
 use std::intrinsics;
-use std::vec;
+use std::slice;
 
 // The way arena uses arrays is really deeply awful. The arrays are
 // allocated, and have capacities reserved, but the fill for the array
 // will always stay at 0.
-#[deriving(Clone)]
+#[deriving(Clone, Eq)]
 struct Chunk {
     data: Rc<RefCell<~[u8]>>,
     fill: Cell<uint>,
@@ -52,11 +54,11 @@ struct Chunk {
 }
 impl Chunk {
     fn capacity(&self) -> uint {
-        self.data.borrow().borrow().get().capacity()
+        self.data.deref().borrow().get().capacity()
     }
 
     unsafe fn as_ptr(&self) -> *u8 {
-        self.data.borrow().borrow().get().as_ptr()
+        self.data.deref().borrow().get().as_ptr()
     }
 }
 
@@ -108,7 +110,7 @@ impl Arena {
 
 fn chunk(size: uint, is_pod: bool) -> Chunk {
     Chunk {
-        data: Rc::new(RefCell::new(vec::with_capacity(size))),
+        data: Rc::new(RefCell::new(slice::with_capacity(size))),
         fill: Cell::new(0u),
         is_pod: Cell::new(is_pod),
     }
@@ -119,13 +121,11 @@ impl Drop for Arena {
     fn drop(&mut self) {
         unsafe {
             destroy_chunk(&self.head);
-
-            list::each(self.chunks.get(), |chunk| {
+            for chunk in self.chunks.get().iter() {
                 if !chunk.is_pod.get() {
                     destroy_chunk(chunk);
                 }
-                true
-            });
+            }
         }
     }
 }
@@ -167,13 +167,12 @@ unsafe fn destroy_chunk(chunk: &Chunk) {
 // is necessary in order to properly do cleanup if a failure occurs
 // during an initializer.
 #[inline]
-unsafe fn bitpack_tydesc_ptr(p: *TyDesc, is_done: bool) -> uint {
-    let p_bits: uint = transmute(p);
-    p_bits | (is_done as uint)
+fn bitpack_tydesc_ptr(p: *TyDesc, is_done: bool) -> uint {
+    p as uint | (is_done as uint)
 }
 #[inline]
-unsafe fn un_bitpack_tydesc_ptr(p: uint) -> (*TyDesc, bool) {
-    (transmute(p & !1), p & 1 == 1)
+fn un_bitpack_tydesc_ptr(p: uint) -> (*TyDesc, bool) {
+    ((p & !1) as *TyDesc, p & 1 == 1)
 }
 
 impl Arena {

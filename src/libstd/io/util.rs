@@ -8,10 +8,12 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+/*! Utility implementations of Reader and Writer */
+
 use prelude::*;
 use cmp;
 use io;
-use vec::bytes::MutableByteVector;
+use slice::bytes::MutableByteVector;
 
 /// Wraps a `Reader`, limiting the number of bytes that can be read from it.
 pub struct LimitReader<R> {

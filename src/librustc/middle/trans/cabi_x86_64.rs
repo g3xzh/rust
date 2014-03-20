@@ -18,11 +18,9 @@ use lib::llvm::{Struct, Array, Attribute};
 use lib::llvm::{StructRetAttribute, ByValAttribute};
 use middle::trans::cabi::*;
 use middle::trans::context::CrateContext;
-
 use middle::trans::type_::Type;
 
 use std::cmp;
-use std::vec;
 
 #[deriving(Clone, Eq)]
 enum RegClass {
@@ -84,7 +82,7 @@ impl<'a> ClassList for &'a [RegClass] {
     }
 }
 
-fn classify_ty(ty: Type) -> ~[RegClass] {
+fn classify_ty(ty: Type) -> Vec<RegClass> {
     fn align(off: uint, ty: Type) -> uint {
         let a = ty_align(ty);
         return (off + a - 1u) / a * a;
@@ -220,7 +218,7 @@ fn classify_ty(ty: Type) -> ~[RegClass] {
                 unify(cls, ix + off / 8u, SSEDs);
             }
             Struct => {
-                classify_struct(ty.field_types(), cls, ix, off);
+                classify_struct(ty.field_types().as_slice(), cls, ix, off);
             }
             Array => {
                 let len = ty.array_length();
@@ -282,17 +280,17 @@ fn classify_ty(ty: Type) -> ~[RegClass] {
     }
 
     let words = (ty_size(ty) + 7) / 8;
-    let mut cls = vec::from_elem(words, NoClass);
+    let mut cls = Vec::from_elem(words, NoClass);
     if words > 4 {
-        all_mem(cls);
+        all_mem(cls.as_mut_slice());
         return cls;
     }
-    classify(ty, cls, 0, 0);
-    fixup(ty, cls);
+    classify(ty, cls.as_mut_slice(), 0, 0);
+    fixup(ty, cls.as_mut_slice());
     return cls;
 }
 
-fn llreg_ty(cls: &[RegClass]) -> Type {
+fn llreg_ty(ccx: &CrateContext, cls: &[RegClass]) -> Type {
     fn llvec_len(cls: &[RegClass]) -> uint {
         let mut len = 1u;
         for c in cls.iter() {
@@ -304,64 +302,68 @@ fn llreg_ty(cls: &[RegClass]) -> Type {
         return len;
     }
 
-    let mut tys = ~[];
+    let mut tys = Vec::new();
     let mut i = 0u;
     let e = cls.len();
     while i < e {
         match cls[i] {
             Int => {
-                tys.push(Type::i64());
+                tys.push(Type::i64(ccx));
             }
             SSEFv => {
                 let vec_len = llvec_len(cls.tailn(i + 1u));
-                let vec_ty = Type::vector(&Type::f32(), (vec_len * 2u) as u64);
+                let vec_ty = Type::vector(&Type::f32(ccx), (vec_len * 2u) as u64);
                 tys.push(vec_ty);
                 i += vec_len;
                 continue;
             }
             SSEFs => {
-                tys.push(Type::f32());
+                tys.push(Type::f32(ccx));
             }
             SSEDs => {
-                tys.push(Type::f64());
+                tys.push(Type::f64(ccx));
             }
             _ => fail!("llregtype: unhandled class")
         }
         i += 1u;
     }
-    return Type::struct_(tys, false);
+    return Type::struct_(ccx, tys.as_slice(), false);
 }
 
-pub fn compute_abi_info(_ccx: &CrateContext,
+pub fn compute_abi_info(ccx: &CrateContext,
                         atys: &[Type],
                         rty: Type,
                         ret_def: bool) -> FnType {
-    fn x86_64_ty(ty: Type,
+    fn x86_64_ty(ccx: &CrateContext,
+                 ty: Type,
                  is_mem_cls: |cls: &[RegClass]| -> bool,
                  attr: Attribute)
                  -> ArgType {
         if !ty.is_reg_ty() {
             let cls = classify_ty(ty);
-            if is_mem_cls(cls) {
+            if is_mem_cls(cls.as_slice()) {
                 ArgType::indirect(ty, Some(attr))
             } else {
-                ArgType::direct(ty, Some(llreg_ty(cls)), None, None)
+                ArgType::direct(ty,
+                                Some(llreg_ty(ccx, cls.as_slice())),
+                                None,
+                                None)
             }
         } else {
             ArgType::direct(ty, None, None, None)
         }
     }
 
-    let mut arg_tys = ~[];
+    let mut arg_tys = Vec::new();
     for t in atys.iter() {
-        let ty = x86_64_ty(*t, |cls| cls.is_pass_byval(), ByValAttribute);
+        let ty = x86_64_ty(ccx, *t, |cls| cls.is_pass_byval(), ByValAttribute);
         arg_tys.push(ty);
     }
 
     let ret_ty = if ret_def {
-        x86_64_ty(rty, |cls| cls.is_ret_bysret(), StructRetAttribute)
+        x86_64_ty(ccx, rty, |cls| cls.is_ret_bysret(), StructRetAttribute)
     } else {
-        ArgType::direct(Type::void(), None, None, None)
+        ArgType::direct(Type::void(ccx), None, None, None)
     };
 
     return FnType {

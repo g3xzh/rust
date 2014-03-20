@@ -22,7 +22,7 @@
 
 use driver::session::Session;
 use metadata::csearch::each_lang_item;
-use middle::ty::{BuiltinBound, BoundFreeze, BoundPod, BoundSend, BoundSized};
+use middle::ty;
 use syntax::ast;
 use syntax::ast_util::local_def;
 use syntax::attr::AttrMetaMethods;
@@ -32,7 +32,7 @@ use syntax::visit;
 
 use collections::HashMap;
 use std::iter::Enumerate;
-use std::vec;
+use std::slice;
 
 // The actual lang items defined come at the end of this file in one handy table.
 // So you probably just want to nip down to the end.
@@ -47,7 +47,7 @@ pub enum LangItem {
 }
 
 pub struct LanguageItems {
-    items: ~[Option<ast::DefId>],
+    items: Vec<Option<ast::DefId>> ,
 }
 
 impl LanguageItems {
@@ -55,11 +55,11 @@ impl LanguageItems {
         fn foo(_: LangItem) -> Option<ast::DefId> { None }
 
         LanguageItems {
-            items: ~[$(foo($variant)),*]
+            items: vec!($(foo($variant)),*)
         }
     }
 
-    pub fn items<'a>(&'a self) -> Enumerate<vec::Items<'a, Option<ast::DefId>>> {
+    pub fn items<'a>(&'a self) -> Enumerate<slice::Items<'a, Option<ast::DefId>>> {
         self.items.iter().enumerate()
     }
 
@@ -72,22 +72,26 @@ impl LanguageItems {
     }
 
     pub fn require(&self, it: LangItem) -> Result<ast::DefId, ~str> {
-        match self.items[it as uint] {
-            Some(id) => Ok(id),
-            None => Err(format!("requires `{}` lang_item",
-                             LanguageItems::item_name(it as uint)))
+        match self.items.get(it as uint) {
+            &Some(id) => Ok(id),
+            &None => {
+                Err(format!("requires `{}` lang_item",
+                            LanguageItems::item_name(it as uint)))
+            }
         }
     }
 
-    pub fn to_builtin_kind(&self, id: ast::DefId) -> Option<BuiltinBound> {
+    pub fn to_builtin_kind(&self, id: ast::DefId) -> Option<ty::BuiltinBound> {
         if Some(id) == self.freeze_trait() {
-            Some(BoundFreeze)
+            Some(ty::BoundFreeze)
         } else if Some(id) == self.send_trait() {
-            Some(BoundSend)
+            Some(ty::BoundSend)
         } else if Some(id) == self.sized_trait() {
-            Some(BoundSized)
+            Some(ty::BoundSized)
         } else if Some(id) == self.pod_trait() {
-            Some(BoundPod)
+            Some(ty::BoundPod)
+        } else if Some(id) == self.share_trait() {
+            Some(ty::BoundShare)
         } else {
             None
         }
@@ -95,32 +99,28 @@ impl LanguageItems {
 
     $(
         pub fn $method(&self) -> Option<ast::DefId> {
-            self.items[$variant as uint]
+            *self.items.get($variant as uint)
         }
     )*
 }
 
-struct LanguageItemCollector {
+struct LanguageItemCollector<'a> {
     items: LanguageItems,
 
-    session: Session,
+    session: &'a Session,
 
     item_refs: HashMap<&'static str, uint>,
 }
 
-struct LanguageItemVisitor<'a> {
-    this: &'a mut LanguageItemCollector,
-}
-
-impl<'a> Visitor<()> for LanguageItemVisitor<'a> {
+impl<'a> Visitor<()> for LanguageItemCollector<'a> {
     fn visit_item(&mut self, item: &ast::Item, _: ()) {
-        match extract(item.attrs) {
+        match extract(item.attrs.as_slice()) {
             Some(value) => {
-                let item_index = self.this.item_refs.find_equiv(&value).map(|x| *x);
+                let item_index = self.item_refs.find_equiv(&value).map(|x| *x);
 
                 match item_index {
                     Some(item_index) => {
-                        self.this.collect_item(item_index, local_def(item.id))
+                        self.collect_item(item_index, local_def(item.id))
                     }
                     None => {}
                 }
@@ -132,8 +132,8 @@ impl<'a> Visitor<()> for LanguageItemVisitor<'a> {
     }
 }
 
-impl LanguageItemCollector {
-    pub fn new(session: Session) -> LanguageItemCollector {
+impl<'a> LanguageItemCollector<'a> {
+    pub fn new(session: &'a Session) -> LanguageItemCollector<'a> {
         let mut item_refs = HashMap::new();
 
         $( item_refs.insert($name, $variant as uint); )*
@@ -147,27 +147,26 @@ impl LanguageItemCollector {
 
     pub fn collect_item(&mut self, item_index: uint, item_def_id: ast::DefId) {
         // Check for duplicates.
-        match self.items.items[item_index] {
-            Some(original_def_id) if original_def_id != item_def_id => {
+        match self.items.items.get(item_index) {
+            &Some(original_def_id) if original_def_id != item_def_id => {
                 self.session.err(format!("duplicate entry for `{}`",
                                       LanguageItems::item_name(item_index)));
             }
-            Some(_) | None => {
+            &Some(_) | &None => {
                 // OK.
             }
         }
 
         // Matched.
-        self.items.items[item_index] = Some(item_def_id);
+        *self.items.items.get_mut(item_index) = Some(item_def_id);
     }
 
     pub fn collect_local_language_items(&mut self, krate: &ast::Crate) {
-        let mut v = LanguageItemVisitor { this: self };
-        visit::walk_crate(&mut v, krate, ());
+        visit::walk_crate(self, krate, ());
     }
 
     pub fn collect_external_language_items(&mut self) {
-        let crate_store = self.session.cstore;
+        let crate_store = &self.session.cstore;
         crate_store.iter_crate_data(|crate_number, _crate_metadata| {
             each_lang_item(crate_store, crate_number, |node_id, item_index| {
                 let def_id = ast::DefId { krate: crate_number, node: node_id };
@@ -197,7 +196,7 @@ pub fn extract(attrs: &[ast::Attribute]) -> Option<InternedString> {
 }
 
 pub fn collect_language_items(krate: &ast::Crate,
-                              session: Session) -> @LanguageItems {
+                              session: &Session) -> @LanguageItems {
     let mut collector = LanguageItemCollector::new(session);
     collector.collect(krate);
     let LanguageItemCollector { items, .. } = collector;
@@ -215,6 +214,7 @@ lets_do_this! {
     SendTraitLangItem,               "send",                    send_trait;
     SizedTraitLangItem,              "sized",                   sized_trait;
     PodTraitLangItem,                "pod",                     pod_trait;
+    ShareTraitLangItem,              "share",                   share_trait;
 
     DropTraitLangItem,               "drop",                    drop_trait;
 
@@ -231,6 +231,11 @@ lets_do_this! {
     ShlTraitLangItem,                "shl",                     shl_trait;
     ShrTraitLangItem,                "shr",                     shr_trait;
     IndexTraitLangItem,              "index",                   index_trait;
+
+    UnsafeTypeLangItem,              "unsafe",                  unsafe_type;
+
+    DerefTraitLangItem,              "deref",                   deref_trait;
+    DerefMutTraitLangItem,           "deref_mut",               deref_mut_trait;
 
     EqTraitLangItem,                 "eq",                      eq_trait;
     OrdTraitLangItem,                "ord",                     ord_trait;
@@ -273,5 +278,6 @@ lets_do_this! {
     NoFreezeItem,                    "no_freeze_bound",         no_freeze_bound;
     NoSendItem,                      "no_send_bound",           no_send_bound;
     NoPodItem,                       "no_pod_bound",            no_pod_bound;
+    NoShareItem,                     "no_share_bound",          no_share_bound;
     ManagedItem,                     "managed_bound",           managed_bound;
 }

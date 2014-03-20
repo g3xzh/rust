@@ -21,7 +21,7 @@ use util::ppaux::Repr;
 
 pub enum RestrictionResult {
     Safe,
-    SafeIf(@LoanPath, ~[Restriction])
+    SafeIf(@LoanPath, Vec<Restriction> )
 }
 
 pub fn compute_restrictions(bccx: &BorrowckCtxt,
@@ -45,7 +45,7 @@ pub fn compute_restrictions(bccx: &BorrowckCtxt,
 // Private
 
 struct RestrictionsContext<'a> {
-    bccx: &'a BorrowckCtxt,
+    bccx: &'a BorrowckCtxt<'a>,
     span: Span,
     cmt_original: mc::cmt,
     loan_region: ty::Region,
@@ -75,8 +75,8 @@ impl<'a> RestrictionsContext<'a> {
             mc::cat_upvar(ty::UpvarId {var_id: local_id, ..}, _) => {
                 // R-Variable
                 let lp = @LpVar(local_id);
-                SafeIf(lp, ~[Restriction {loan_path: lp,
-                                          set: restrictions}])
+                SafeIf(lp, vec!(Restriction {loan_path: lp,
+                                          set: restrictions}))
             }
 
             mc::cat_downcast(cmt_base) => {
@@ -174,8 +174,10 @@ impl<'a> RestrictionsContext<'a> {
             SafeIf(base_lp, base_vec) => {
                 let lp = @LpExtend(base_lp, mc, elem);
                 SafeIf(lp, vec::append_one(base_vec,
-                                           Restriction {loan_path: lp,
-                                                        set: restrictions}))
+                                              Restriction {
+                                                  loan_path: lp,
+                                                  set: restrictions
+                                              }))
             }
         }
     }

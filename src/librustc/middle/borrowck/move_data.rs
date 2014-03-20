@@ -32,35 +32,37 @@ use util::ppaux::Repr;
 
 pub struct MoveData {
     /// Move paths. See section "Move paths" in `doc.rs`.
-    paths: RefCell<~[MovePath]>,
+    paths: RefCell<Vec<MovePath>>,
 
     /// Cache of loan path to move path index, for easy lookup.
     path_map: RefCell<HashMap<@LoanPath, MovePathIndex>>,
 
     /// Each move or uninitialized variable gets an entry here.
-    moves: RefCell<~[Move]>,
+    moves: RefCell<Vec<Move>>,
 
     /// Assignments to a variable, like `x = foo`. These are assigned
     /// bits for dataflow, since we must track them to ensure that
     /// immutable variables are assigned at most once along each path.
-    var_assignments: RefCell<~[Assignment]>,
+    var_assignments: RefCell<Vec<Assignment>>,
 
     /// Assignments to a path, like `x.f = foo`. These are not
     /// assigned dataflow bits, but we track them because they still
     /// kill move bits.
-    path_assignments: RefCell<~[Assignment]>,
+    path_assignments: RefCell<Vec<Assignment>>,
+
+    /// Assignments to a variable or path, like `x = foo`, but not `x += foo`.
     assignee_ids: RefCell<HashSet<ast::NodeId>>,
 }
 
-pub struct FlowedMoveData {
+pub struct FlowedMoveData<'a> {
     move_data: MoveData,
 
-    dfcx_moves: MoveDataFlow,
+    dfcx_moves: MoveDataFlow<'a>,
 
     // We could (and maybe should, for efficiency) combine both move
     // and assign data flow into one, but this way it's easier to
     // distinguish the bits that correspond to moves and assignments.
-    dfcx_assign: AssignDataFlow
+    dfcx_assign: AssignDataFlow<'a>
 }
 
 /// Index into `MoveData.paths`, used like a pointer
@@ -156,7 +158,7 @@ impl Clone for MoveDataFlowOperator {
     }
 }
 
-pub type MoveDataFlow = DataFlowContext<MoveDataFlowOperator>;
+pub type MoveDataFlow<'a> = DataFlowContext<'a, MoveDataFlowOperator>;
 
 pub struct AssignDataFlowOperator;
 
@@ -168,63 +170,63 @@ impl Clone for AssignDataFlowOperator {
     }
 }
 
-pub type AssignDataFlow = DataFlowContext<AssignDataFlowOperator>;
+pub type AssignDataFlow<'a> = DataFlowContext<'a, AssignDataFlowOperator>;
 
 impl MoveData {
     pub fn new() -> MoveData {
         MoveData {
-            paths: RefCell::new(~[]),
+            paths: RefCell::new(Vec::new()),
             path_map: RefCell::new(HashMap::new()),
-            moves: RefCell::new(~[]),
-            path_assignments: RefCell::new(~[]),
-            var_assignments: RefCell::new(~[]),
+            moves: RefCell::new(Vec::new()),
+            path_assignments: RefCell::new(Vec::new()),
+            var_assignments: RefCell::new(Vec::new()),
             assignee_ids: RefCell::new(HashSet::new()),
         }
     }
 
     fn path_loan_path(&self, index: MovePathIndex) -> @LoanPath {
         let paths = self.paths.borrow();
-        paths.get()[index.get()].loan_path
+        paths.get().get(index.get()).loan_path
     }
 
     fn path_parent(&self, index: MovePathIndex) -> MovePathIndex {
         let paths = self.paths.borrow();
-        paths.get()[index.get()].parent
+        paths.get().get(index.get()).parent
     }
 
     fn path_first_move(&self, index: MovePathIndex) -> MoveIndex {
         let paths = self.paths.borrow();
-        paths.get()[index.get()].first_move
+        paths.get().get(index.get()).first_move
     }
 
     fn path_first_child(&self, index: MovePathIndex) -> MovePathIndex {
         let paths = self.paths.borrow();
-        paths.get()[index.get()].first_child
+        paths.get().get(index.get()).first_child
     }
 
     fn path_next_sibling(&self, index: MovePathIndex) -> MovePathIndex {
         let paths = self.paths.borrow();
-        paths.get()[index.get()].next_sibling
+        paths.get().get(index.get()).next_sibling
     }
 
     fn set_path_first_move(&self,
                            index: MovePathIndex,
                            first_move: MoveIndex) {
         let mut paths = self.paths.borrow_mut();
-        paths.get()[index.get()].first_move = first_move
+        paths.get().get_mut(index.get()).first_move = first_move
     }
 
     fn set_path_first_child(&self,
                             index: MovePathIndex,
                             first_child: MovePathIndex) {
         let mut paths = self.paths.borrow_mut();
-        paths.get()[index.get()].first_child = first_child
+        paths.get().get_mut(index.get()).first_child = first_child
     }
 
     fn move_next_move(&self, index: MoveIndex) -> MoveIndex {
         //! Type safe indexing operator
         let moves = self.moves.borrow();
-        moves.get()[index.get()].next_move
+        moves.get().get(index.get()).next_move
     }
 
     fn is_var_path(&self, index: MovePathIndex) -> bool {
@@ -233,7 +235,7 @@ impl MoveData {
     }
 
     pub fn move_path(&self,
-                     tcx: ty::ctxt,
+                     tcx: &ty::ctxt,
                      lp: @LoanPath) -> MovePathIndex {
         /*!
          * Returns the existing move path index for `lp`, if any,
@@ -352,7 +354,7 @@ impl MoveData {
     }
 
     pub fn add_move(&self,
-                    tcx: ty::ctxt,
+                    tcx: &ty::ctxt,
                     lp: @LoanPath,
                     id: ast::NodeId,
                     kind: MoveKind) {
@@ -387,11 +389,12 @@ impl MoveData {
     }
 
     pub fn add_assignment(&self,
-                          tcx: ty::ctxt,
+                          tcx: &ty::ctxt,
                           lp: @LoanPath,
                           assign_id: ast::NodeId,
                           span: Span,
-                          assignee_id: ast::NodeId) {
+                          assignee_id: ast::NodeId,
+                          is_also_move: bool) {
         /*!
          * Adds a new record for an assignment to `lp` that occurs at
          * location `id` with the given `span`.
@@ -402,7 +405,7 @@ impl MoveData {
 
         let path_index = self.move_path(tcx, lp);
 
-        {
+        if !is_also_move {
             let mut assignee_ids = self.assignee_ids.borrow_mut();
             assignee_ids.get().insert(assignee_id);
         }
@@ -431,7 +434,7 @@ impl MoveData {
     }
 
     fn add_gen_kills(&self,
-                     tcx: ty::ctxt,
+                     tcx: &ty::ctxt,
                      dfcx_moves: &mut MoveDataFlow,
                      dfcx_assign: &mut AssignDataFlow) {
         /*!
@@ -562,13 +565,13 @@ impl MoveData {
     }
 }
 
-impl FlowedMoveData {
+impl<'a> FlowedMoveData<'a> {
     pub fn new(move_data: MoveData,
-               tcx: ty::ctxt,
-               method_map: typeck::method_map,
+               tcx: &'a ty::ctxt,
+               method_map: typeck::MethodMap,
                id_range: ast_util::IdRange,
                body: &ast::Block)
-               -> FlowedMoveData {
+               -> FlowedMoveData<'a> {
         let mut dfcx_moves = {
             let moves = move_data.moves.borrow();
             DataFlowContext::new(tcx,
@@ -605,7 +608,7 @@ impl FlowedMoveData {
 
         self.dfcx_moves.each_gen_bit_frozen(id, |index| {
             let moves = self.move_data.moves.borrow();
-            let move = &moves.get()[index];
+            let move = moves.get().get(index);
             let moved_path = move.path;
             f(move, self.move_data.path_loan_path(moved_path))
         })
@@ -644,7 +647,7 @@ impl FlowedMoveData {
 
         self.dfcx_moves.each_bit_on_entry_frozen(id, |index| {
             let moves = self.move_data.moves.borrow();
-            let move = &moves.get()[index];
+            let move = moves.get().get(index);
             let moved_path = move.path;
             if base_indices.iter().any(|x| x == &moved_path) {
                 // Scenario 1 or 2: `loan_path` or some base path of
@@ -702,7 +705,7 @@ impl FlowedMoveData {
 
         self.dfcx_assign.each_bit_on_entry_frozen(id, |index| {
             let var_assignments = self.move_data.var_assignments.borrow();
-            let assignment = &var_assignments.get()[index];
+            let assignment = var_assignments.get().get(index);
             if assignment.path == loan_path_index && !f(assignment) {
                 false
             } else {

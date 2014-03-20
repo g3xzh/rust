@@ -54,14 +54,14 @@ pub enum DefIdSource {
     // Identifies a region parameter (`fn foo<'X>() { ... }`).
     RegionParameter,
 }
-type conv_did<'a> =
+pub type conv_did<'a> =
     'a |source: DefIdSource, ast::DefId| -> ast::DefId;
 
 pub struct PState<'a> {
     data: &'a [u8],
     krate: ast::CrateNum,
     pos: uint,
-    tcx: ty::ctxt
+    tcx: &'a ty::ctxt
 }
 
 fn peek(st: &PState) -> char {
@@ -104,7 +104,7 @@ fn parse_ident_(st: &mut PState, is_last: |char| -> bool) -> ast::Ident {
 }
 
 pub fn parse_state_from_data<'a>(data: &'a [u8], crate_num: ast::CrateNum,
-                             pos: uint, tcx: ty::ctxt) -> PState<'a> {
+                             pos: uint, tcx: &'a ty::ctxt) -> PState<'a> {
     PState {
         data: data,
         krate: crate_num,
@@ -113,25 +113,25 @@ pub fn parse_state_from_data<'a>(data: &'a [u8], crate_num: ast::CrateNum,
     }
 }
 
-pub fn parse_ty_data(data: &[u8], crate_num: ast::CrateNum, pos: uint, tcx: ty::ctxt,
+pub fn parse_ty_data(data: &[u8], crate_num: ast::CrateNum, pos: uint, tcx: &ty::ctxt,
                      conv: conv_did) -> ty::t {
     let mut st = parse_state_from_data(data, crate_num, pos, tcx);
     parse_ty(&mut st, conv)
 }
 
-pub fn parse_bare_fn_ty_data(data: &[u8], crate_num: ast::CrateNum, pos: uint, tcx: ty::ctxt,
+pub fn parse_bare_fn_ty_data(data: &[u8], crate_num: ast::CrateNum, pos: uint, tcx: &ty::ctxt,
                              conv: conv_did) -> ty::BareFnTy {
     let mut st = parse_state_from_data(data, crate_num, pos, tcx);
     parse_bare_fn_ty(&mut st, conv)
 }
 
-pub fn parse_trait_ref_data(data: &[u8], crate_num: ast::CrateNum, pos: uint, tcx: ty::ctxt,
+pub fn parse_trait_ref_data(data: &[u8], crate_num: ast::CrateNum, pos: uint, tcx: &ty::ctxt,
                             conv: conv_did) -> ty::TraitRef {
     let mut st = parse_state_from_data(data, crate_num, pos, tcx);
     parse_trait_ref(&mut st, conv)
 }
 
-pub fn parse_substs_data(data: &[u8], crate_num: ast::CrateNum, pos: uint, tcx: ty::ctxt,
+pub fn parse_substs_data(data: &[u8], crate_num: ast::CrateNum, pos: uint, tcx: &ty::ctxt,
                          conv: conv_did) -> ty::substs {
     let mut st = parse_state_from_data(data, crate_num, pos, tcx);
     parse_substs(&mut st, conv)
@@ -177,7 +177,7 @@ fn parse_substs(st: &mut PState, conv: conv_did) -> ty::substs {
     let self_ty = parse_opt(st, |st| parse_ty(st, |x,y| conv(x,y)) );
 
     assert_eq!(next(st), '[');
-    let mut params: ~[ty::t] = ~[];
+    let mut params: Vec<ty::t> = Vec::new();
     while peek(st) != ']' { params.push(parse_ty(st, |x,y| conv(x,y))); }
     st.pos = st.pos + 1u;
 
@@ -362,7 +362,7 @@ fn parse_ty(st: &mut PState, conv: conv_did) -> ty::t {
       }
       'T' => {
         assert_eq!(next(st), '[');
-        let mut params = ~[];
+        let mut params = Vec::new();
         while peek(st) != ']' { params.push(parse_ty(st, |x,y| conv(x,y))); }
         st.pos = st.pos + 1u;
         return ty::mk_tup(st.tcx, params);
@@ -520,7 +520,7 @@ fn parse_sig(st: &mut PState, conv: conv_did) -> ty::FnSig {
     assert_eq!(next(st), '[');
     let id = parse_uint(st) as ast::NodeId;
     assert_eq!(next(st), '|');
-    let mut inputs = ~[];
+    let mut inputs = Vec::new();
     while peek(st) != ']' {
         inputs.push(parse_ty(st, |x,y| conv(x,y)));
     }
@@ -564,7 +564,7 @@ pub fn parse_def_id(buf: &[u8]) -> ast::DefId {
 }
 
 pub fn parse_type_param_def_data(data: &[u8], start: uint,
-                                 crate_num: ast::CrateNum, tcx: ty::ctxt,
+                                 crate_num: ast::CrateNum, tcx: &ty::ctxt,
                                  conv: conv_did) -> ty::TypeParameterDef
 {
     let mut st = parse_state_from_data(data, crate_num, start, tcx);
@@ -583,7 +583,7 @@ fn parse_type_param_def(st: &mut PState, conv: conv_did) -> ty::TypeParameterDef
 fn parse_bounds(st: &mut PState, conv: conv_did) -> ty::ParamBounds {
     let mut param_bounds = ty::ParamBounds {
         builtin_bounds: ty::EmptyBuiltinBounds(),
-        trait_bounds: ~[]
+        trait_bounds: Vec::new()
     };
     loop {
         match next(st) {
@@ -601,6 +601,9 @@ fn parse_bounds(st: &mut PState, conv: conv_did) -> ty::ParamBounds {
             }
             'P' => {
                 param_bounds.builtin_bounds.add(ty::BoundPod);
+            }
+            'T' => {
+                param_bounds.builtin_bounds.add(ty::BoundShare);
             }
             'I' => {
                 param_bounds.trait_bounds.push(@parse_trait_ref(st, |x,y| conv(x,y)));

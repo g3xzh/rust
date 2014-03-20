@@ -20,7 +20,7 @@ pub fn main () {
     let args = os::args();
     if args.len() > 1 && args[1] == ~"child" {
         for _ in range(0, 1000) {
-            error!("hello?");
+            println!("hello?");
         }
         for _ in range(0, 1000) {
             println!("hello?");
@@ -31,14 +31,11 @@ pub fn main () {
     let config = process::ProcessConfig {
         program : args[0].as_slice(),
         args : &[~"child"],
-        env : None,
-        cwd : None,
-        io : &[],
-        uid: None,
-        gid: None,
-        detach: false,
+        stdout: process::Ignored,
+        stderr: process::Ignored,
+        .. process::ProcessConfig::new()
     };
 
-    let mut p = process::Process::new(config).unwrap();
+    let mut p = process::Process::configure(config).unwrap();
     println!("{}", p.wait());
 }

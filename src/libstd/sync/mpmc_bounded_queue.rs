@@ -35,7 +35,7 @@ use num::next_power_of_two;
 use option::{Option, Some, None};
 use sync::arc::UnsafeArc;
 use sync::atomics::{AtomicUint,Relaxed,Release,Acquire};
-use vec;
+use slice;
 
 struct Node<T> {
     sequence: AtomicUint,
@@ -69,8 +69,8 @@ impl<T: Send> State<T> {
         } else {
             capacity
         };
-        let buffer = vec::from_fn(capacity, |i:uint| {
-            Node{sequence:AtomicUint::new(i),value:None}
+        let buffer = slice::from_fn(capacity, |i| {
+            Node { sequence:AtomicUint::new(i), value: None }
         });
         State{
             pad0: [0, ..64],
@@ -172,24 +172,24 @@ mod tests {
         let nmsgs = 1000u;
         let mut q = Queue::with_capacity(nthreads*nmsgs);
         assert_eq!(None, q.pop());
-        let (port, chan) = Chan::new();
+        let (tx, rx) = channel();
 
         for _ in range(0, nthreads) {
             let q = q.clone();
-            let chan = chan.clone();
+            let tx = tx.clone();
             native::task::spawn(proc() {
                 let mut q = q;
                 for i in range(0, nmsgs) {
                     assert!(q.push(i));
                 }
-                chan.send(());
+                tx.send(());
             });
         }
 
-        let mut completion_ports = ~[];
+        let mut completion_rxs = ~[];
         for _ in range(0, nthreads) {
-            let (completion_port, completion_chan) = Chan::new();
-            completion_ports.push(completion_port);
+            let (tx, rx) = channel();
+            completion_rxs.push(rx);
             let q = q.clone();
             native::task::spawn(proc() {
                 let mut q = q;
@@ -203,15 +203,15 @@ mod tests {
                         }
                     }
                 }
-                completion_chan.send(i);
+                tx.send(i);
             });
         }
 
-        for completion_port in completion_ports.mut_iter() {
-            assert_eq!(nmsgs, completion_port.recv());
+        for rx in completion_rxs.mut_iter() {
+            assert_eq!(nmsgs, rx.recv());
         }
         for _ in range(0, nthreads) {
-            port.recv();
+            rx.recv();
         }
     }
 }

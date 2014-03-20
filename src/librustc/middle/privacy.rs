@@ -13,13 +13,14 @@
 //! which are available for use externally when compiled as a library.
 
 use std::mem::replace;
-use collections::{HashSet, HashMap};
 
 use metadata::csearch;
+use middle::lint;
 use middle::resolve;
 use middle::ty;
-use middle::typeck::{method_map, method_origin, method_param};
-use middle::typeck::{method_static, method_object};
+use middle::typeck::{MethodCall, MethodMap, MethodOrigin, MethodParam};
+use middle::typeck::{MethodStatic, MethodObject};
+use util::nodemap::{NodeMap, NodeSet};
 
 use syntax::ast;
 use syntax::ast_map;
@@ -31,15 +32,15 @@ use syntax::opt_vec;
 use syntax::visit;
 use syntax::visit::Visitor;
 
-type Context<'a> = (&'a method_map, &'a resolve::ExportMap2);
+type Context<'a> = (&'a MethodMap, &'a resolve::ExportMap2);
 
 /// A set of AST nodes exported by the crate.
-pub type ExportedItems = HashSet<ast::NodeId>;
+pub type ExportedItems = NodeSet;
 
 /// A set of AST nodes that are fully public in the crate. This map is used for
 /// documentation purposes (reexporting a private struct inlines the doc,
 /// reexporting a public struct doesn't inline the doc).
-pub type PublicItems = HashSet<ast::NodeId>;
+pub type PublicItems = NodeSet;
 
 /// Result of a checking operation - None => no errors were found. Some => an
 /// error and contains the span and message for reporting that error and
@@ -51,7 +52,7 @@ type CheckResult = Option<(Span, ~str, Option<(Span, ~str)>)>;
 ////////////////////////////////////////////////////////////////////////////////
 
 struct ParentVisitor {
-    parents: HashMap<ast::NodeId, ast::NodeId>,
+    parents: NodeMap<ast::NodeId>,
     curparent: ast::NodeId,
 }
 
@@ -140,7 +141,7 @@ impl Visitor<()> for ParentVisitor {
 ////////////////////////////////////////////////////////////////////////////////
 
 struct EmbargoVisitor<'a> {
-    tcx: ty::ctxt,
+    tcx: &'a ty::ctxt,
     exp_map2: &'a resolve::ExportMap2,
 
     // This flag is an indicator of whether the previous item in the
@@ -160,7 +161,7 @@ struct EmbargoVisitor<'a> {
     // all nodes which are reexported *and* reachable from external crates. This
     // means that the destination of the reexport is exported, and hence the
     // destination must also be exported.
-    reexports: HashSet<ast::NodeId>,
+    reexports: NodeSet,
 
     // These two fields are closely related to one another in that they are only
     // used for generation of the 'PublicItems' set, not for privacy checking at
@@ -343,12 +344,12 @@ impl<'a> Visitor<()> for EmbargoVisitor<'a> {
 ////////////////////////////////////////////////////////////////////////////////
 
 struct PrivacyVisitor<'a> {
-    tcx: ty::ctxt,
+    tcx: &'a ty::ctxt,
     curitem: ast::NodeId,
     in_fn: bool,
     in_foreign: bool,
-    method_map: &'a method_map,
-    parents: HashMap<ast::NodeId, ast::NodeId>,
+    method_map: &'a MethodMap,
+    parents: NodeMap<ast::NodeId>,
     external_exports: resolve::ExternalExports,
     last_private_map: resolve::LastPrivateMap,
 }
@@ -583,7 +584,7 @@ impl<'a> PrivacyVisitor<'a> {
                 }
             }
         } else {
-            let cstore = self.tcx.sess.cstore;
+            let cstore = &self.tcx.sess.cstore;
             match enum_id {
                 Some(enum_id) => {
                     let v = csearch::get_enum_variants(self.tcx, enum_id);
@@ -738,16 +739,16 @@ impl<'a> PrivacyVisitor<'a> {
     }
 
     // Checks that a method is in scope.
-    fn check_method(&mut self, span: Span, origin: &method_origin,
+    fn check_method(&mut self, span: Span, origin: MethodOrigin,
                     ident: ast::Ident) {
-        match *origin {
-            method_static(method_id) => {
+        match origin {
+            MethodStatic(method_id) => {
                 self.check_static_method(span, method_id, ident)
             }
             // Trait methods are always all public. The only controlling factor
             // is whether the trait itself is accessible or not.
-            method_param(method_param { trait_id: trait_id, .. }) |
-            method_object(method_object { trait_id: trait_id, .. }) => {
+            MethodParam(MethodParam { trait_id: trait_id, .. }) |
+            MethodObject(MethodObject { trait_id: trait_id, .. }) => {
                 self.report_error(self.ensure_public(span, trait_id, None, "source trait"));
             }
         }
@@ -758,7 +759,7 @@ impl<'a> Visitor<()> for PrivacyVisitor<'a> {
     fn visit_item(&mut self, item: &ast::Item, _: ()) {
         // Do not check privacy inside items with the resolve_unexported
         // attribute. This is used for the test runner.
-        if attr::contains_name(item.attrs, "!resolve_unexported") {
+        if attr::contains_name(item.attrs.as_slice(), "!resolve_unexported") {
             return;
         }
 
@@ -770,39 +771,26 @@ impl<'a> Visitor<()> for PrivacyVisitor<'a> {
     fn visit_expr(&mut self, expr: &ast::Expr, _: ()) {
         match expr.node {
             ast::ExprField(base, ident, _) => {
-                // Method calls are now a special syntactic form,
-                // so `a.b` should always be a field.
-                let method_map = self.method_map.borrow();
-                assert!(!method_map.get().contains_key(&expr.id));
-
-                // With type_autoderef, make sure we don't
-                // allow pointers to violate privacy
-                let t = ty::type_autoderef(ty::expr_ty(self.tcx, base));
-                match ty::get(t).sty {
+                match ty::get(ty::expr_ty_adjusted(self.tcx, base,
+                                                   self.method_map.borrow().get())).sty {
                     ty::ty_struct(id, _) => {
                         self.check_field(expr.span, id, ident, None);
                     }
                     _ => {}
                 }
             }
-            ast::ExprMethodCall(_, ident, _, ref args) => {
-                // see above
-                let t = ty::type_autoderef(ty::expr_ty(self.tcx, args[0]));
-                match ty::get(t).sty {
-                    ty::ty_enum(_, _) | ty::ty_struct(_, _) => {
-                        match self.method_map.borrow().get().find(&expr.id) {
-                            None => {
-                                self.tcx.sess.span_bug(expr.span,
-                                                       "method call not in \
-                                                        method map");
-                            }
-                            Some(origin) => {
-                                debug!("(privacy checking) checking impl method");
-                                self.check_method(expr.span, origin, ident);
-                            }
-                        }
+            ast::ExprMethodCall(ident, _, _) => {
+                let method_call = MethodCall::expr(expr.id);
+                match self.method_map.borrow().get().find(&method_call) {
+                    None => {
+                        self.tcx.sess.span_bug(expr.span,
+                                                "method call not in \
+                                                method map");
                     }
-                    _ => {}
+                    Some(method) => {
+                        debug!("(privacy checking) checking impl method");
+                        self.check_method(expr.span, method.origin, ident);
+                    }
                 }
             }
             ast::ExprStruct(_, ref fields, _) => {
@@ -843,7 +831,7 @@ impl<'a> Visitor<()> for PrivacyVisitor<'a> {
 
     fn visit_view_item(&mut self, a: &ast::ViewItem, _: ()) {
         match a.node {
-            ast::ViewItemExternMod(..) => {}
+            ast::ViewItemExternCrate(..) => {}
             ast::ViewItemUse(ref uses) => {
                 for vpath in uses.iter() {
                     match vpath.node {
@@ -853,10 +841,10 @@ impl<'a> Visitor<()> for PrivacyVisitor<'a> {
                                 debug!("privacy - list {}", pid.node.id);
                                 let seg = ast::PathSegment {
                                     identifier: pid.node.name,
-                                    lifetimes: opt_vec::Empty,
+                                    lifetimes: Vec::new(),
                                     types: opt_vec::Empty,
                                 };
-                                let segs = ~[seg];
+                                let segs = vec!(seg);
                                 let path = ast::Path {
                                     global: false,
                                     span: pid.span,
@@ -931,12 +919,12 @@ impl<'a> Visitor<()> for PrivacyVisitor<'a> {
 /// The privacy sanity check visitor, ensures unnecessary visibility isn't here
 ////////////////////////////////////////////////////////////////////////////////
 
-struct SanePrivacyVisitor {
-    tcx: ty::ctxt,
+struct SanePrivacyVisitor<'a> {
+    tcx: &'a ty::ctxt,
     in_fn: bool,
 }
 
-impl Visitor<()> for SanePrivacyVisitor {
+impl<'a> Visitor<()> for SanePrivacyVisitor<'a> {
     fn visit_item(&mut self, item: &ast::Item, _: ()) {
         if self.in_fn {
             self.check_all_inherited(item);
@@ -974,7 +962,7 @@ impl Visitor<()> for SanePrivacyVisitor {
                                                     reachable");
                 } else {
                     match i.node {
-                        ast::ViewItemExternMod(..) => {
+                        ast::ViewItemExternCrate(..) => {
                             self.tcx.sess.span_err(i.span, "`pub` visibility \
                                                             is not allowed");
                         }
@@ -987,7 +975,7 @@ impl Visitor<()> for SanePrivacyVisitor {
     }
 }
 
-impl SanePrivacyVisitor {
+impl<'a> SanePrivacyVisitor<'a> {
     /// Validates all of the visibility qualifers placed on the item given. This
     /// ensures that there are no extraneous qualifiers that don't actually do
     /// anything. In theory these qualifiers wouldn't parse, but that may happen
@@ -1169,15 +1157,260 @@ impl SanePrivacyVisitor {
     }
 }
 
-pub fn check_crate(tcx: ty::ctxt,
-                   method_map: &method_map,
+struct VisiblePrivateTypesVisitor<'a> {
+    tcx: &'a ty::ctxt,
+    exported_items: &'a ExportedItems,
+    public_items: &'a PublicItems,
+}
+
+struct CheckTypeForPrivatenessVisitor<'a, 'b> {
+    inner: &'b VisiblePrivateTypesVisitor<'a>,
+    /// whether the type refers to private types.
+    contains_private: bool,
+    /// whether we've recurred at all (i.e. if we're pointing at the
+    /// first type on which visit_ty was called).
+    at_outer_type: bool,
+    // whether that first type is a public path.
+    outer_type_is_public_path: bool,
+}
+
+impl<'a> VisiblePrivateTypesVisitor<'a> {
+    fn path_is_private_type(&self, path_id: ast::NodeId) -> bool {
+        let did = match self.tcx.def_map.borrow().get().find_copy(&path_id) {
+            // `int` etc. (None doesn't seem to occur.)
+            None | Some(ast::DefPrimTy(..)) => return false,
+            Some(def) => def_id_of_def(def)
+        };
+        // A path can only be private if:
+        // it's in this crate...
+        is_local(did) &&
+            // ... it's not exported (obviously) ...
+            !self.exported_items.contains(&did.node) &&
+            // .. and it corresponds to a type in the AST (this returns None for
+            // type parameters)
+            self.tcx.map.find(did.node).is_some()
+    }
+
+    fn trait_is_public(&self, trait_id: ast::NodeId) -> bool {
+        // FIXME: this would preferably be using `exported_items`, but all
+        // traits are exported currently (see `EmbargoVisitor.exported_trait`)
+        self.public_items.contains(&trait_id)
+    }
+}
+
+impl<'a, 'b> Visitor<()> for CheckTypeForPrivatenessVisitor<'a, 'b> {
+    fn visit_ty(&mut self, ty: &ast::Ty, _: ()) {
+        match ty.node {
+            ast::TyPath(_, _, path_id) => {
+                if self.inner.path_is_private_type(path_id) {
+                    self.contains_private = true;
+                    // found what we're looking for so let's stop
+                    // working.
+                    return
+                } else if self.at_outer_type {
+                    self.outer_type_is_public_path = true;
+                }
+            }
+            _ => {}
+        }
+        self.at_outer_type = false;
+        visit::walk_ty(self, ty, ())
+    }
+
+    // don't want to recurse into [, .. expr]
+    fn visit_expr(&mut self, _: &ast::Expr, _: ()) {}
+}
+
+impl<'a> Visitor<()> for VisiblePrivateTypesVisitor<'a> {
+    fn visit_item(&mut self, item: &ast::Item, _: ()) {
+        match item.node {
+            // contents of a private mod can be reexported, so we need
+            // to check internals.
+            ast::ItemMod(_) => {}
+
+            // An `extern {}` doesn't introduce a new privacy
+            // namespace (the contents have their own privacies).
+            ast::ItemForeignMod(_) => {}
+
+            ast::ItemTrait(..) if !self.trait_is_public(item.id) => return,
+
+            // impls need some special handling to try to offer useful
+            // error messages without (too many) false positives
+            // (i.e. we could just return here to not check them at
+            // all, or some worse estimation of whether an impl is
+            // publically visible.
+            ast::ItemImpl(ref g, ref trait_ref, self_, ref methods) => {
+                // `impl [... for] Private` is never visible.
+                let self_contains_private;
+                // impl [... for] Public<...>, but not `impl [... for]
+                // ~[Public]` or `(Public,)` etc.
+                let self_is_public_path;
+
+                // check the properties of the Self type:
+                {
+                    let mut visitor = CheckTypeForPrivatenessVisitor {
+                        inner: self,
+                        contains_private: false,
+                        at_outer_type: true,
+                        outer_type_is_public_path: false,
+                    };
+                    visitor.visit_ty(self_, ());
+                    self_contains_private = visitor.contains_private;
+                    self_is_public_path = visitor.outer_type_is_public_path;
+                }
+
+                // miscellanous info about the impl
+
+                // `true` iff this is `impl Private for ...`.
+                let not_private_trait =
+                    trait_ref.as_ref().map_or(true, // no trait counts as public trait
+                                              |tr| {
+                        let did = ty::trait_ref_to_def_id(self.tcx, tr);
+
+                        !is_local(did) || self.trait_is_public(did.node)
+                    });
+
+                // `true` iff this is a trait impl or at least one method is public.
+                //
+                // `impl Public { $( fn ...() {} )* }` is not visible.
+                //
+                // This is required over just using the methods' privacy
+                // directly because we might have `impl<T: Foo<Private>> ...`,
+                // and we shouldn't warn about the generics if all the methods
+                // are private (because `T` won't be visible externally).
+                let trait_or_some_public_method =
+                    trait_ref.is_some() ||
+                    methods.iter().any(|m| self.exported_items.contains(&m.id));
+
+                if !self_contains_private &&
+                        not_private_trait &&
+                        trait_or_some_public_method {
+
+                    visit::walk_generics(self, g, ());
+
+                    match *trait_ref {
+                        None => {
+                            for method in methods.iter() {
+                                visit::walk_method_helper(self, *method, ())
+                            }
+                        }
+                        Some(ref tr) => {
+                            // Any private types in a trait impl fall into two
+                            // categories.
+                            // 1. mentioned in the trait definition
+                            // 2. mentioned in the type params/generics
+                            //
+                            // Those in 1. can only occur if the trait is in
+                            // this crate and will've been warned about on the
+                            // trait definition (there's no need to warn twice
+                            // so we don't check the methods).
+                            //
+                            // Those in 2. are warned via walk_generics and this
+                            // call here.
+                            visit::walk_trait_ref_helper(self, tr, ())
+                        }
+                    }
+                } else if trait_ref.is_none() && self_is_public_path {
+                    // impl Public<Private> { ... }. Any public static
+                    // methods will be visible as `Public::foo`.
+                    let mut found_pub_static = false;
+                    for method in methods.iter() {
+                        if method.explicit_self.node == ast::SelfStatic &&
+                            self.exported_items.contains(&method.id) {
+                            found_pub_static = true;
+                            visit::walk_method_helper(self, *method, ());
+                        }
+                    }
+                    if found_pub_static {
+                        visit::walk_generics(self, g, ())
+                    }
+                }
+                return
+            }
+
+            // `type ... = ...;` can contain private types, because
+            // we're introducing a new name.
+            ast::ItemTy(..) => return,
+
+            // not at all public, so we don't care
+            _ if !self.exported_items.contains(&item.id) => return,
+
+            _ => {}
+        }
+
+        // we've carefully constructed it so that if we're here, then
+        // any `visit_ty`'s will be called on things that are in
+        // public signatures, i.e. things that we're interested in for
+        // this visitor.
+        visit::walk_item(self, item, ());
+    }
+
+    fn visit_foreign_item(&mut self, item: &ast::ForeignItem, _: ()) {
+        if self.exported_items.contains(&item.id) {
+            visit::walk_foreign_item(self, item, ())
+        }
+    }
+
+    fn visit_fn(&mut self,
+                fk: &visit::FnKind, fd: &ast::FnDecl, b: &ast::Block, s: Span, id: ast::NodeId,
+                _: ()) {
+        // needs special handling for methods.
+        if self.exported_items.contains(&id) {
+            visit::walk_fn(self, fk, fd, b, s, id, ());
+        }
+    }
+
+    fn visit_ty(&mut self, t: &ast::Ty, _: ()) {
+        match t.node {
+            ast::TyPath(ref p, _, path_id) => {
+                if self.path_is_private_type(path_id) {
+                    self.tcx.sess.add_lint(lint::VisiblePrivateTypes,
+                                           path_id, p.span,
+                                           ~"private type in exported type signature");
+                }
+            }
+            _ => {}
+        }
+        visit::walk_ty(self, t, ())
+    }
+
+    fn visit_variant(&mut self, v: &ast::Variant, g: &ast::Generics, _: ()) {
+        if self.exported_items.contains(&v.node.id) {
+            visit::walk_variant(self, v, g, ());
+        }
+    }
+
+    fn visit_struct_field(&mut self, s: &ast::StructField, _: ()) {
+        match s.node.kind {
+            // the only way to get here is by being inside a public
+            // struct/enum variant, so the only way to have a private
+            // field is with an explicit `priv`.
+            ast::NamedField(_, ast::Private) => {}
+
+            _ => visit::walk_struct_field(self, s, ())
+        }
+    }
+
+
+    // we don't need to introspect into these at all: an
+    // expression/block context can't possibly contain exported
+    // things, and neither do view_items. (Making them no-ops stops us
+    // from traversing the whole AST without having to be super
+    // careful about our `walk_...` calls above.)
+    fn visit_view_item(&mut self, _: &ast::ViewItem, _: ()) {}
+    fn visit_block(&mut self, _: &ast::Block, _: ()) {}
+    fn visit_expr(&mut self, _: &ast::Expr, _: ()) {}
+}
+
+pub fn check_crate(tcx: &ty::ctxt,
+                   method_map: &MethodMap,
                    exp_map2: &resolve::ExportMap2,
                    external_exports: resolve::ExternalExports,
                    last_private_map: resolve::LastPrivateMap,
                    krate: &ast::Crate) -> (ExportedItems, PublicItems) {
     // Figure out who everyone's parent is
     let mut visitor = ParentVisitor {
-        parents: HashMap::new(),
+        parents: NodeMap::new(),
         curparent: ast::DUMMY_NODE_ID,
     };
     visit::walk_crate(&mut visitor, krate, ());
@@ -1209,9 +1442,9 @@ pub fn check_crate(tcx: ty::ctxt,
     // items which are reachable from external crates based on visibility.
     let mut visitor = EmbargoVisitor {
         tcx: tcx,
-        exported_items: HashSet::new(),
-        public_items: HashSet::new(),
-        reexports: HashSet::new(),
+        exported_items: NodeSet::new(),
+        public_items: NodeSet::new(),
+        reexports: NodeSet::new(),
         exp_map2: exp_map2,
         prev_exported: true,
         prev_public: true,
@@ -1225,5 +1458,14 @@ pub fn check_crate(tcx: ty::ctxt,
     }
 
     let EmbargoVisitor { exported_items, public_items, .. } = visitor;
+
+    {
+        let mut visitor = VisiblePrivateTypesVisitor {
+            tcx: tcx,
+            exported_items: &exported_items,
+            public_items: &public_items
+        };
+        visit::walk_crate(&mut visitor, krate, ());
+    }
     return (exported_items, public_items);
 }

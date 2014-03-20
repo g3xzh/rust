@@ -22,10 +22,8 @@ use codemap::{Span, respan};
 use parse::parser::Parser;
 use parse::token;
 
-use std::to_bytes;
-
 /// The specific types of unsupported syntax
-#[deriving(Eq)]
+#[deriving(Eq, Hash)]
 pub enum ObsoleteSyntax {
     ObsoleteSwap,
     ObsoleteUnsafeBlock,
@@ -46,13 +44,6 @@ pub enum ObsoleteSyntax {
     ObsoleteManagedVec,
 }
 
-impl to_bytes::IterBytes for ObsoleteSyntax {
-    #[inline]
-    fn iter_bytes(&self, lsb0: bool, f: to_bytes::Cb) -> bool {
-        (*self as uint).iter_bytes(lsb0, f)
-    }
-}
-
 pub trait ParserObsoleteMethods {
     /// Reports an obsolete syntax non-fatal error.
     fn obsolete(&mut self, sp: Span, kind: ObsoleteSyntax);
@@ -68,7 +59,7 @@ pub trait ParserObsoleteMethods {
     fn eat_obsolete_ident(&mut self, ident: &str) -> bool;
 }
 
-impl ParserObsoleteMethods for Parser {
+impl<'a> ParserObsoleteMethods for Parser<'a> {
     /// Reports an obsolete syntax non-fatal error.
     fn obsolete(&mut self, sp: Span, kind: ObsoleteSyntax) {
         let (kind_str, desc) = match kind {

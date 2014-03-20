@@ -11,12 +11,12 @@
 // This file was auto-generated using 'src/etc/generate-keyword-span-tests.py'
 
 #[feature(struct_variant)];
-extern crate extra;
+extern crate rand;
 
-
+#[deriving(Eq)]
 struct Error;
 
-#[deriving(Ord)]
+#[deriving(Eq, Ord)]
 enum Enum {
    A {
      x: Error //~ ERROR

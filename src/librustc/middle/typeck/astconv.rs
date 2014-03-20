@@ -20,7 +20,7 @@
  * `AstConv` instance; in this phase, the `get_item_ty()` function
  * triggers a recursive call to `ty_of_item()`  (note that
  * `ast_ty_to_ty()` will detect recursive types and report an error).
- * In the check phase, when the @FnCtxt is used as the `AstConv`,
+ * In the check phase, when the FnCtxt is used as the `AstConv`,
  * `get_item_ty()` just looks up the item type in `tcx.tcache`.
  *
  * The `RegionScope` trait controls what happens when the user does
@@ -51,7 +51,6 @@
 
 
 use middle::const_eval;
-use middle::lint;
 use middle::subst::Subst;
 use middle::ty::{substs};
 use middle::ty::{ty_param_substs_and_ty};
@@ -61,7 +60,6 @@ use middle::typeck::rscope::{RegionScope};
 use middle::typeck::lookup_def_tcx;
 use util::ppaux::Repr;
 
-use std::vec;
 use syntax::abi::AbiSet;
 use syntax::{ast, ast_util};
 use syntax::codemap::Span;
@@ -70,7 +68,7 @@ use syntax::opt_vec;
 use syntax::print::pprust::{lifetime_to_str, path_to_str};
 
 pub trait AstConv {
-    fn tcx(&self) -> ty::ctxt;
+    fn tcx<'a>(&'a self) -> &'a ty::ctxt;
     fn get_item_ty(&self, id: ast::DefId) -> ty::ty_param_bounds_and_ty;
     fn get_trait_def(&self, id: ast::DefId) -> @ty::TraitDef;
 
@@ -78,10 +76,9 @@ pub trait AstConv {
     fn ty_infer(&self, span: Span) -> ty::t;
 }
 
-pub fn ast_region_to_region(tcx: ty::ctxt, lifetime: &ast::Lifetime)
+pub fn ast_region_to_region(tcx: &ty::ctxt, lifetime: &ast::Lifetime)
                             -> ty::Region {
-    let named_region_map = tcx.named_region_map.borrow();
-    let r = match named_region_map.get().find(&lifetime.id) {
+    let r = match tcx.named_region_map.find(&lifetime.id) {
         None => {
             // should have been recorded by the `resolve_lifetime` pass
             tcx.sess.span_bug(lifetime.span, "unresolved lifetime");
@@ -93,18 +90,18 @@ pub fn ast_region_to_region(tcx: ty::ctxt, lifetime: &ast::Lifetime)
 
         Some(&ast::DefLateBoundRegion(binder_id, _, id)) => {
             ty::ReLateBound(binder_id, ty::BrNamed(ast_util::local_def(id),
-                                                   lifetime.ident))
+                                                   lifetime.name))
         }
 
         Some(&ast::DefEarlyBoundRegion(index, id)) => {
-            ty::ReEarlyBound(id, index, lifetime.ident)
+            ty::ReEarlyBound(id, index, lifetime.name)
         }
 
         Some(&ast::DefFreeRegion(scope_id, id)) => {
             ty::ReFree(ty::FreeRegion {
                     scope_id: scope_id,
                     bound_region: ty::BrNamed(ast_util::local_def(id),
-                                              lifetime.ident)
+                                              lifetime.name)
                 })
         }
     };
@@ -137,7 +134,7 @@ fn opt_ast_region_to_region<AC:AstConv,RS:RegionScope>(
                 }
 
                 Ok(rs) => {
-                    rs[0]
+                    *rs.get(0)
                 }
             }
         }
@@ -187,9 +184,9 @@ fn ast_path_substs<AC:AstConv,RS:RegionScope>(
         }
 
         match anon_regions {
-            Ok(v) => opt_vec::from(v),
-            Err(()) => opt_vec::from(vec::from_fn(expected_num_region_params,
-                                                  |_| ty::ReStatic)) // hokey
+            Ok(v) => v.move_iter().collect(),
+            Err(()) => Vec::from_fn(expected_num_region_params,
+                                    |_| ty::ReStatic) // hokey
         }
     };
 
@@ -219,11 +216,12 @@ fn ast_path_substs<AC:AstConv,RS:RegionScope>(
                 expected, formal_ty_param_count, supplied_ty_param_count));
     }
 
-    if supplied_ty_param_count > required_ty_param_count {
-        let id = path.segments.iter().flat_map(|s| s.types.iter())
-                              .nth(required_ty_param_count).unwrap().id;
-        this.tcx().sess.add_lint(lint::DefaultTypeParamUsage, id, path.span,
-                                 ~"provided type arguments with defaults");
+    if supplied_ty_param_count > required_ty_param_count
+        && !this.tcx().sess.features.default_type_params.get() {
+        this.tcx().sess.span_err(path.span, "default type parameters are \
+                                             experimental and possibly buggy");
+        this.tcx().sess.span_note(path.span, "add #[feature(default_type_params)] \
+                                              to the crate attributes to enable");
     }
 
     let tps = path.segments.iter().flat_map(|s| s.types.iter())
@@ -231,7 +229,7 @@ fn ast_path_substs<AC:AstConv,RS:RegionScope>(
                             .collect();
 
     let mut substs = substs {
-        regions: ty::NonerasedRegions(regions),
+        regions: ty::NonerasedRegions(opt_vec::from(regions)),
         self_ty: self_ty,
         tps: tps
     };
@@ -304,7 +302,7 @@ pub fn ast_path_to_ty<AC:AstConv,RS:RegionScope>(
 pub static NO_REGIONS: uint = 1;
 pub static NO_TPS: uint = 2;
 
-fn check_path_args(tcx: ty::ctxt,
+fn check_path_args(tcx: &ty::ctxt,
                    path: &ast::Path,
                    flags: uint) {
     if (flags & NO_TPS) != 0u {
@@ -324,7 +322,7 @@ fn check_path_args(tcx: ty::ctxt,
     }
 }
 
-pub fn ast_ty_to_prim_ty(tcx: ty::ctxt, ast_ty: &ast::Ty) -> Option<ty::t> {
+pub fn ast_ty_to_prim_ty(tcx: &ty::ctxt, ast_ty: &ast::Ty) -> Option<ty::t> {
     match ast_ty.node {
         ast::TyPath(ref path, _, id) => {
             let def_map = tcx.def_map.borrow();
@@ -393,7 +391,7 @@ pub fn ast_ty_to_ty<AC:AstConv, RS:RegionScope>(
         VStore(ty::vstore)
     }
     impl PointerTy {
-        fn expect_vstore(&self, tcx: ty::ctxt, span: Span, ty: &str) -> ty::vstore {
+        fn expect_vstore(&self, tcx: &ty::ctxt, span: Span, ty: &str) -> ty::vstore {
             match *self {
                 Box => {
                     tcx.sess.span_err(span, format!("managed {} are not supported", ty));
@@ -519,7 +517,9 @@ pub fn ast_ty_to_ty<AC:AstConv, RS:RegionScope>(
                            |tmt| ty::mk_rptr(tcx, r, tmt))
             }
             ast::TyTup(ref fields) => {
-                let flds = fields.map(|&t| ast_ty_to_ty(this, rscope, t));
+                let flds = fields.iter()
+                                 .map(|&t| ast_ty_to_ty(this, rscope, t))
+                                 .collect();
                 ty::mk_tup(tcx, flds)
             }
             ast::TyBareFn(ref bf) => {
@@ -612,7 +612,7 @@ pub fn ast_ty_to_ty<AC:AstConv, RS:RegionScope>(
                 }
             }
             ast::TyFixedLengthVec(ty, e) => {
-                match const_eval::eval_const_expr_partial(&tcx, e) {
+                match const_eval::eval_const_expr_partial(tcx, e) {
                     Ok(ref r) => {
                         match *r {
                             const_eval::const_int(i) =>
@@ -638,13 +638,11 @@ pub fn ast_ty_to_ty<AC:AstConv, RS:RegionScope>(
                 tcx.sess.span_bug(ast_ty.span, "typeof is reserved but unimplemented");
             }
             ast::TyInfer => {
-                // ty_infer should only appear as the type of arguments or return
-                // values in a fn_expr, or as the type of local variables.  Both of
-                // these cases are handled specially and should not descend into this
-                // routine.
-                this.tcx().sess.span_bug(
-                    ast_ty.span,
-                    "found `ty_infer` in unexpected place");
+                // TyInfer also appears as the type of arguments or return
+                // values in a ExprFnBlock or ExprProc, or as the type of
+                // local variables. Both of these cases are handled specially
+                // and will not descend into this routine.
+                this.ty_infer(ast_ty.span)
             }
         });
 
@@ -789,7 +787,11 @@ pub fn ty_of_closure<AC:AstConv,RS:RegionScope>(
         let expected_arg_ty = expected_sig.as_ref().and_then(|e| {
             // no guarantee that the correct number of expected args
             // were supplied
-            if i < e.inputs.len() {Some(e.inputs[i])} else {None}
+            if i < e.inputs.len() {
+                Some(*e.inputs.get(i))
+            } else {
+                None
+            }
         });
         ty_of_arg(this, &rb, a, expected_arg_ty)
     }).collect();
@@ -814,7 +816,7 @@ pub fn ty_of_closure<AC:AstConv,RS:RegionScope>(
     }
 }
 
-fn conv_builtin_bounds(tcx: ty::ctxt, ast_bounds: &Option<OptVec<ast::TyParamBound>>,
+fn conv_builtin_bounds(tcx: &ty::ctxt, ast_bounds: &Option<OptVec<ast::TyParamBound>>,
                        store: ty::TraitStore)
                        -> ty::BuiltinBounds {
     //! Converts a list of bounds from the AST into a `BuiltinBounds`

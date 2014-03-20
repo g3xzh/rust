@@ -71,10 +71,9 @@ use iter::Iterator;
 use option::{Option, None, Some};
 use str;
 use str::{MaybeOwned, OwnedStr, Str, StrSlice, from_utf8_lossy};
-use to_str::ToStr;
-use vec;
-use vec::{CloneableVector, OwnedCloneableVector, OwnedVector, Vector};
-use vec::{ImmutableEqVector, ImmutableVector};
+use slice;
+use slice::{CloneableVector, OwnedCloneableVector, OwnedVector, Vector};
+use slice::{ImmutableEqVector, ImmutableVector};
 
 /// Typedef for POSIX file paths.
 /// See `posix::Path` for more info.
@@ -301,7 +300,7 @@ pub trait GenericPath: Clone + GenericPathUnsafe {
                             } else {
                                 let mut v;
                                 let extension = extension.container_as_bytes();
-                                v = vec::with_capacity(name.len() + extension.len() + 1);
+                                v = slice::with_capacity(name.len() + extension.len() + 1);
                                 v.push_all(name);
                                 v.push(dot);
                                 v.push_all(extension);
@@ -314,7 +313,7 @@ pub trait GenericPath: Clone + GenericPathUnsafe {
                             } else {
                                 let mut v;
                                 let extension = extension.container_as_bytes();
-                                v = vec::with_capacity(idx + extension.len() + 1);
+                                v = slice::with_capacity(idx + extension.len() + 1);
                                 v.push_all(name.slice_to(idx+1));
                                 v.push_all(extension);
                                 Some(v)
@@ -496,16 +495,6 @@ pub struct Display<'a, P> {
 impl<'a, P: GenericPath> fmt::Show for Display<'a, P> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         self.as_maybe_owned().as_slice().fmt(f)
-    }
-}
-
-impl<'a, P: GenericPath> ToStr for Display<'a, P> {
-    /// Returns the path as a string
-    ///
-    /// If the path is not UTF-8, invalid sequences with be replaced with the
-    /// unicode replacement char. This involves allocation.
-    fn to_str(&self) -> ~str {
-        self.as_maybe_owned().into_owned()
     }
 }
 

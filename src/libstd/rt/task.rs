@@ -17,11 +17,10 @@ use any::AnyOwnExt;
 use cast;
 use cleanup;
 use clone::Clone;
-use comm::Chan;
+use comm::Sender;
 use io::Writer;
 use iter::{Iterator, Take};
 use local_data;
-use logging::Logger;
 use ops::Drop;
 use option::{Option, Some, None};
 use prelude::drop;
@@ -51,7 +50,6 @@ pub struct Task {
     destroyed: bool,
     name: Option<SendStr>,
 
-    logger: Option<~Logger>,
     stdout: Option<~Writer>,
     stderr: Option<~Writer>,
 
@@ -73,7 +71,7 @@ pub enum DeathAction {
     /// until all its watched children exit before collecting the status.
     Execute(proc(TaskResult)),
     /// A channel to send the result of the task on when the task exits
-    SendMessage(Chan<TaskResult>),
+    SendMessage(Sender<TaskResult>),
 }
 
 /// Per-task state related to task death, killing, failure, etc.
@@ -95,7 +93,6 @@ impl Task {
             death: Death::new(),
             destroyed: false,
             name: None,
-            logger: None,
             stdout: None,
             stderr: None,
             imp: None,
@@ -129,11 +126,9 @@ impl Task {
                 #[allow(unused_must_use)]
                 fn close_outputs() {
                     let mut task = Local::borrow(None::<Task>);
-                    let logger = task.get().logger.take();
                     let stderr = task.get().stderr.take();
                     let stdout = task.get().stdout.take();
                     drop(task);
-                    drop(logger); // loggers are responsible for flushing
                     match stdout { Some(mut w) => { w.flush(); }, None => {} }
                     match stderr { Some(mut w) => { w.flush(); }, None => {} }
                 }
@@ -450,16 +445,16 @@ mod test {
 
     #[test]
     fn comm_stream() {
-        let (port, chan) = Chan::new();
-        chan.send(10);
-        assert!(port.recv() == 10);
+        let (tx, rx) = channel();
+        tx.send(10);
+        assert!(rx.recv() == 10);
     }
 
     #[test]
     fn comm_shared_chan() {
-        let (port, chan) = Chan::new();
-        chan.send(10);
-        assert!(port.recv() == 10);
+        let (tx, rx) = channel();
+        tx.send(10);
+        assert!(rx.recv() == 10);
     }
 
     #[test]

@@ -8,16 +8,104 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-/*!
- * Atomic types
- *
- * Basic atomic types supporting atomic operations. Each method takes an
- * `Ordering` which represents the strength of the memory barrier for that
- * operation. These orderings are the same as C++11 atomic orderings
- * [http://gcc.gnu.org/wiki/Atomic/GCCMM/AtomicSync]
- *
- * All atomic types are a single word in size.
- */
+//! Atomic types
+//!
+//! Atomic types provide primitive shared-memory communication between
+//! threads, and are the building blocks of other concurrent
+//! types.
+//!
+//! This module defines atomic versions of a select number of primitive
+//! types, including `AtomicBool`, `AtomicInt`, `AtomicUint`, and `AtomicOption`.
+//! Atomic types present operations that, when used correctly, synchronize
+//! updates between threads.
+//!
+//! Each method takes an `Ordering` which represents the strength of
+//! the memory barrier for that operation. These orderings are the
+//! same as [C++11 atomic orderings][1].
+//!
+//! [1]: http://gcc.gnu.org/wiki/Atomic/GCCMM/AtomicSync
+//!
+//! Atomic variables are safe to share between threads (they implement `Share`)
+//! but they do not themselves provide the mechanism for sharing. The most
+//! common way to share an atomic variable is to put it into an `Arc` (an
+//! atomically-reference-counted shared pointer).
+//!
+//! Most atomic types may be stored in static variables, initialized using
+//! the provided static initializers like `INIT_ATOMIC_BOOL`. Atomic statics
+//! are often used for lazy global initialization.
+//!
+//!
+//! # Examples
+//!
+//! A simple spinlock:
+//!
+//! ```ignore
+//! # // FIXME: Needs PR #12430
+//! extern crate sync;
+//!
+//! use sync::Arc;
+//! use std::sync::atomics::{AtomicUint, SeqCst};
+//! use std::task::deschedule;
+//!
+//! fn main() {
+//!     let spinlock = Arc::new(AtomicUint::new(1));
+//!
+//!     let spinlock_clone = spinlock.clone();
+//!     spawn(proc() {
+//!         spinlock_clone.store(0, SeqCst);
+//!     });
+//!
+//!     // Wait for the other task to release the lock
+//!     while spinlock.load(SeqCst) != 0 {
+//!         // Since tasks may not be preemptive (if they are green threads)
+//!         // yield to the scheduler to let the other task run. Low level
+//!         // concurrent code needs to take into account Rust's two threading
+//!         // models.
+//!         deschedule();
+//!     }
+//! }
+//! ```
+//!
+//! Transferring a heap object with `AtomicOption`:
+//!
+//! ```ignore
+//! # // FIXME: Needs PR #12430
+//! extern crate sync;
+//!
+//! use sync::Arc;
+//! use std::sync::atomics::{AtomicOption, SeqCst};
+//!
+//! fn main() {
+//!     struct BigObject;
+//!
+//!     let shared_big_object = Arc::new(AtomicOption::empty());
+//!
+//!     let shared_big_object_clone = shared_big_object.clone();
+//!     spawn(proc() {
+//!         let unwrapped_big_object = shared_big_object_clone.take(SeqCst);
+//!         if unwrapped_big_object.is_some() {
+//!             println!("got a big object from another task");
+//!         } else {
+//!             println!("other task hasn't sent big object yet");
+//!         }
+//!     });
+//!
+//!     shared_big_object.swap(~BigObject, SeqCst);
+//! }
+//! ```
+//!
+//! Keep a global count of live tasks:
+//!
+//! ```
+//! use std::sync::atomics::{AtomicUint, SeqCst, INIT_ATOMIC_UINT};
+//!
+//! static mut GLOBAL_TASK_COUNT: AtomicUint = INIT_ATOMIC_UINT;
+//!
+//! unsafe {
+//!     let old_task_count = GLOBAL_TASK_COUNT.fetch_add(1, SeqCst);
+//!     println!("live tasks: {}", old_task_count + 1);
+//! }
+//! ```
 
 #[allow(missing_doc)];
 
@@ -26,323 +114,533 @@ use cast;
 use std::kinds::marker;
 use option::{Option,Some,None};
 use ops::Drop;
+use ty::Unsafe;
 
-/**
- * A simple atomic flag, that can be set and cleared. The most basic atomic type.
- */
-pub struct AtomicFlag {
-    priv v: int,
-    priv nopod: marker::NoPod
-}
-
-/**
- * An atomic boolean type.
- */
+/// An atomic boolean type.
 pub struct AtomicBool {
-    priv v: uint,
+    priv v: Unsafe<uint>,
     priv nopod: marker::NoPod
 }
 
-/**
- * A signed atomic integer type, supporting basic atomic arithmetic operations
- */
+/// A signed atomic integer type, supporting basic atomic arithmetic operations
 pub struct AtomicInt {
-    priv v: int,
+    priv v: Unsafe<int>,
     priv nopod: marker::NoPod
 }
 
-/**
- * An unsigned atomic integer type, supporting basic atomic arithmetic operations
- */
+/// An unsigned atomic integer type, supporting basic atomic arithmetic operations
 pub struct AtomicUint {
-    priv v: uint,
+    priv v: Unsafe<uint>,
     priv nopod: marker::NoPod
 }
 
-/**
- * An unsigned atomic integer type that is forced to be 64-bits. This does not
- * support all operations.
- */
+/// An unsigned atomic integer type that is forced to be 64-bits. This does not
+/// support all operations.
 pub struct AtomicU64 {
-    priv v: u64,
+    priv v: Unsafe<u64>,
     priv nopod: marker::NoPod
 }
 
-/**
- * An unsafe atomic pointer. Only supports basic atomic operations
- */
+/// An unsafe atomic pointer. Only supports basic atomic operations
 pub struct AtomicPtr<T> {
-    priv p: uint,
+    priv p: Unsafe<uint>,
     priv nopod: marker::NoPod
 }
 
-/**
- * An owned atomic pointer. Ensures that only a single reference to the data is held at any time.
- */
+/// An atomic, nullable unique pointer
+///
+/// This can be used as the concurrency primitive for operations that transfer
+/// owned heap objects across tasks.
 #[unsafe_no_drop_flag]
 pub struct AtomicOption<T> {
-    priv p: uint,
+    priv p: Unsafe<uint>,
 }
 
+/// Atomic memory orderings
+///
+/// Memory orderings limit the ways that both the compiler and CPU may reorder
+/// instructions around atomic operations. At its most restrictive,
+/// "sequentially consistent" atomics allow neither reads nor writes
+/// to be moved either before or after the atomic operation; on the other end
+/// "relaxed" atomics allow all reorderings.
+///
+/// Rust's memory orderings are the same as in C++[1].
+///
+/// [1]: http://gcc.gnu.org/wiki/Atomic/GCCMM/AtomicSync
 pub enum Ordering {
+    /// No ordering constraints, only atomic operations
     Relaxed,
+    /// When coupled with a store, all previous writes become visible
+    /// to another thread that performs a load with `Acquire` ordering
+    /// on the same value
     Release,
+    /// When coupled with a load, all subsequent loads will see data
+    /// written before a store with `Release` ordering on the same value
+    /// in another thread
     Acquire,
+    /// When coupled with a load, uses `Acquire` ordering, and with a store
+    /// `Release` ordering
     AcqRel,
+    /// Like `AcqRel` with the additional guarantee that all threads see all
+    /// sequentially consistent operations in the same order.
     SeqCst
 }
 
-pub static INIT_ATOMIC_FLAG : AtomicFlag = AtomicFlag { v: 0, nopod: marker::NoPod };
-pub static INIT_ATOMIC_BOOL : AtomicBool = AtomicBool { v: 0, nopod: marker::NoPod };
-pub static INIT_ATOMIC_INT  : AtomicInt  = AtomicInt  { v: 0, nopod: marker::NoPod };
-pub static INIT_ATOMIC_UINT : AtomicUint = AtomicUint { v: 0, nopod: marker::NoPod };
-pub static INIT_ATOMIC_U64 : AtomicU64 = AtomicU64 { v: 0, nopod: marker::NoPod };
+/// An `AtomicBool` initialized to `false`
+pub static INIT_ATOMIC_BOOL : AtomicBool = AtomicBool { v: Unsafe{value: 0,
+                                                                  marker1: marker::InvariantType},
+                                                        nopod: marker::NoPod };
+/// An `AtomicInt` initialized to `0`
+pub static INIT_ATOMIC_INT  : AtomicInt  = AtomicInt  { v: Unsafe{value: 0,
+                                                                  marker1: marker::InvariantType},
+                                                        nopod: marker::NoPod };
+/// An `AtomicUint` initialized to `0`
+pub static INIT_ATOMIC_UINT : AtomicUint = AtomicUint { v: Unsafe{value: 0,
+                                                                  marker1: marker::InvariantType},
+                                                        nopod: marker::NoPod };
+/// An `AtomicU64` initialized to `0`
+pub static INIT_ATOMIC_U64 : AtomicU64 = AtomicU64 { v: Unsafe{value: 0,
+                                                               marker1: marker::InvariantType},
+                                                     nopod: marker::NoPod };
 
-impl AtomicFlag {
 
-    pub fn new() -> AtomicFlag {
-        AtomicFlag { v: 0, nopod: marker::NoPod}
-    }
-
-    /**
-     * Clears the atomic flag
-     */
-    #[inline]
-    pub fn clear(&mut self, order: Ordering) {
-        unsafe {atomic_store(&mut self.v, 0, order)}
-    }
-
-    /**
-     * Sets the flag if it was previously unset, returns the previous value of the
-     * flag.
-     */
-    #[inline]
-    pub fn test_and_set(&mut self, order: Ordering) -> bool {
-        unsafe { atomic_compare_and_swap(&mut self.v, 0, 1, order) > 0 }
-    }
-}
+// NB: Needs to be -1 (0b11111111...) to make fetch_nand work correctly
+static UINT_TRUE: uint = -1;
 
 impl AtomicBool {
+    /// Create a new `AtomicBool`
     pub fn new(v: bool) -> AtomicBool {
-        AtomicBool { v: if v { 1 } else { 0 }, nopod: marker::NoPod }
+        let val = if v { UINT_TRUE } else { 0 };
+        AtomicBool { v: Unsafe::new(val), nopod: marker::NoPod }
     }
 
+    /// Load the value
     #[inline]
     pub fn load(&self, order: Ordering) -> bool {
-        unsafe { atomic_load(&self.v, order) > 0 }
+        unsafe { atomic_load(&*self.v.get(), order) > 0 }
     }
 
+    /// Store the value
     #[inline]
     pub fn store(&mut self, val: bool, order: Ordering) {
-        let val = if val { 1 } else { 0 };
+        let val = if val { UINT_TRUE } else { 0 };
 
-        unsafe { atomic_store(&mut self.v, val, order); }
+        unsafe { atomic_store(&mut *self.v.get(), val, order); }
     }
 
+    /// Store a value, returning the old value
     #[inline]
     pub fn swap(&mut self, val: bool, order: Ordering) -> bool {
-        let val = if val { 1 } else { 0 };
+        let val = if val { UINT_TRUE } else { 0 };
 
-        unsafe { atomic_swap(&mut self.v, val, order) > 0 }
+        unsafe { atomic_swap(&mut *self.v.get(), val, order) > 0 }
     }
 
+    /// If the current value is the same as expected, store a new value
+    ///
+    /// Compare the current value with `old`; if they are the same then
+    /// replace the current value with `new`. Return the previous value.
+    /// If the return value is equal to `old` then the value was updated.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// # // FIXME: Needs PR #12430
+    /// extern crate sync;
+    ///
+    /// use sync::Arc;
+    /// use std::sync::atomics::{AtomicBool, SeqCst};
+    ///
+    /// fn main() {
+    ///     let spinlock = Arc::new(AtomicBool::new(false));
+    ///     let spinlock_clone = spin_lock.clone();
+    ///
+    ///     spawn(proc() {
+    ///         with_lock(&spinlock, || println!("task 1 in lock"));
+    ///     });
+    ///
+    ///     spawn(proc() {
+    ///         with_lock(&spinlock_clone, || println!("task 2 in lock"));
+    ///     });
+    /// }
+    ///
+    /// fn with_lock(spinlock: &Arc<AtomicBool>, f: || -> ()) {
+    ///     // CAS loop until we are able to replace `false` with `true`
+    ///     while spinlock.compare_and_swap(false, true, SeqCst) == false {
+    ///         // Since tasks may not be preemptive (if they are green threads)
+    ///         // yield to the scheduler to let the other task run. Low level
+    ///         // concurrent code needs to take into account Rust's two threading
+    ///         // models.
+    ///         deschedule();
+    ///     }
+    ///
+    ///     // Now we have the spinlock
+    ///     f();
+    ///
+    ///     // Release the lock
+    ///     spinlock.store(false);
+    /// }
+    /// ```
     #[inline]
     pub fn compare_and_swap(&mut self, old: bool, new: bool, order: Ordering) -> bool {
-        let old = if old { 1 } else { 0 };
-        let new = if new { 1 } else { 0 };
+        let old = if old { UINT_TRUE } else { 0 };
+        let new = if new { UINT_TRUE } else { 0 };
 
-        unsafe { atomic_compare_and_swap(&mut self.v, old, new, order) > 0 }
+        unsafe { atomic_compare_and_swap(&mut *self.v.get(), old, new, order) > 0 }
     }
 
-    /// Returns the old value
+    /// A logical "and" operation
+    ///
+    /// Performs a logical "and" operation on the current value and the
+    /// argument `val`, and sets the new value to the result.
+    /// Returns the previous value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::atomics::{AtomicBool, SeqCst};
+    ///
+    /// let mut foo = AtomicBool::new(true);
+    /// assert_eq!(true, foo.fetch_and(false, SeqCst));
+    /// assert_eq!(false, foo.load(SeqCst));
+    ///
+    /// let mut foo = AtomicBool::new(true);
+    /// assert_eq!(true, foo.fetch_and(true, SeqCst));
+    /// assert_eq!(true, foo.load(SeqCst));
+    ///
+    /// let mut foo = AtomicBool::new(false);
+    /// assert_eq!(false, foo.fetch_and(false, SeqCst));
+    /// assert_eq!(false, foo.load(SeqCst));
+    /// ```
     #[inline]
     pub fn fetch_and(&mut self, val: bool, order: Ordering) -> bool {
-        let val = if val { 1 } else { 0 };
+        let val = if val { UINT_TRUE } else { 0 };
 
-        unsafe { atomic_and(&mut self.v, val, order) > 0 }
+        unsafe { atomic_and(&mut *self.v.get(), val, order) > 0 }
     }
 
-    /// Returns the old value
+    /// A logical "nand" operation
+    ///
+    /// Performs a logical "nand" operation on the current value and the
+    /// argument `val`, and sets the new value to the result.
+    /// Returns the previous value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::atomics::{AtomicBool, SeqCst};
+    ///
+    /// let mut foo = AtomicBool::new(true);
+    /// assert_eq!(true, foo.fetch_nand(false, SeqCst));
+    /// assert_eq!(true, foo.load(SeqCst));
+    ///
+    /// let mut foo = AtomicBool::new(true);
+    /// assert_eq!(true, foo.fetch_nand(true, SeqCst));
+    /// assert_eq!(0, foo.load(SeqCst) as int);
+    /// assert_eq!(false, foo.load(SeqCst));
+    ///
+    /// let mut foo = AtomicBool::new(false);
+    /// assert_eq!(false, foo.fetch_nand(false, SeqCst));
+    /// assert_eq!(true, foo.load(SeqCst));
+    /// ```
     #[inline]
     pub fn fetch_nand(&mut self, val: bool, order: Ordering) -> bool {
-        let val = if val { 1 } else { 0 };
+        let val = if val { UINT_TRUE } else { 0 };
 
-        unsafe { atomic_nand(&mut self.v, val, order) > 0 }
+        unsafe { atomic_nand(&mut *self.v.get(), val, order) > 0 }
     }
 
-    /// Returns the old value
+    /// A logical "or" operation
+    ///
+    /// Performs a logical "or" operation on the current value and the
+    /// argument `val`, and sets the new value to the result.
+    /// Returns the previous value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::atomics::{AtomicBool, SeqCst};
+    ///
+    /// let mut foo = AtomicBool::new(true);
+    /// assert_eq!(true, foo.fetch_or(false, SeqCst));
+    /// assert_eq!(true, foo.load(SeqCst));
+    ///
+    /// let mut foo = AtomicBool::new(true);
+    /// assert_eq!(true, foo.fetch_or(true, SeqCst));
+    /// assert_eq!(true, foo.load(SeqCst));
+    ///
+    /// let mut foo = AtomicBool::new(false);
+    /// assert_eq!(false, foo.fetch_or(false, SeqCst));
+    /// assert_eq!(false, foo.load(SeqCst));
+    /// ```
     #[inline]
     pub fn fetch_or(&mut self, val: bool, order: Ordering) -> bool {
-        let val = if val { 1 } else { 0 };
+        let val = if val { UINT_TRUE } else { 0 };
 
-        unsafe { atomic_or(&mut self.v, val, order) > 0 }
+        unsafe { atomic_or(&mut *self.v.get(), val, order) > 0 }
     }
 
-    /// Returns the old value
+    /// A logical "xor" operation
+    ///
+    /// Performs a logical "xor" operation on the current value and the
+    /// argument `val`, and sets the new value to the result.
+    /// Returns the previous value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::atomics::{AtomicBool, SeqCst};
+    ///
+    /// let mut foo = AtomicBool::new(true);
+    /// assert_eq!(true, foo.fetch_xor(false, SeqCst));
+    /// assert_eq!(true, foo.load(SeqCst));
+    ///
+    /// let mut foo = AtomicBool::new(true);
+    /// assert_eq!(true, foo.fetch_xor(true, SeqCst));
+    /// assert_eq!(false, foo.load(SeqCst));
+    ///
+    /// let mut foo = AtomicBool::new(false);
+    /// assert_eq!(false, foo.fetch_xor(false, SeqCst));
+    /// assert_eq!(false, foo.load(SeqCst));
+    /// ```
     #[inline]
     pub fn fetch_xor(&mut self, val: bool, order: Ordering) -> bool {
-        let val = if val { 1 } else { 0 };
+        let val = if val { UINT_TRUE } else { 0 };
 
-        unsafe { atomic_xor(&mut self.v, val, order) > 0 }
+        unsafe { atomic_xor(&mut *self.v.get(), val, order) > 0 }
     }
 }
 
 impl AtomicInt {
+    /// Create a new `AtomicInt`
     pub fn new(v: int) -> AtomicInt {
-        AtomicInt { v:v, nopod: marker::NoPod}
+        AtomicInt {v: Unsafe::new(v), nopod: marker::NoPod}
     }
 
+    /// Load the value
     #[inline]
     pub fn load(&self, order: Ordering) -> int {
-        unsafe { atomic_load(&self.v, order) }
+        unsafe { atomic_load(&*self.v.get(), order) }
     }
 
+    /// Store the value
     #[inline]
     pub fn store(&mut self, val: int, order: Ordering) {
-        unsafe { atomic_store(&mut self.v, val, order); }
+        unsafe { atomic_store(&mut *self.v.get(), val, order); }
     }
 
+    /// Store a value, returning the old value
     #[inline]
     pub fn swap(&mut self, val: int, order: Ordering) -> int {
-        unsafe { atomic_swap(&mut self.v, val, order) }
+        unsafe { atomic_swap(&mut *self.v.get(), val, order) }
     }
 
+    /// If the current value is the same as expected, store a new value
+    ///
+    /// Compare the current value with `old`; if they are the same then
+    /// replace the current value with `new`. Return the previous value.
+    /// If the return value is equal to `old` then the value was updated.
     #[inline]
     pub fn compare_and_swap(&mut self, old: int, new: int, order: Ordering) -> int {
-        unsafe { atomic_compare_and_swap(&mut self.v, old, new, order) }
+        unsafe { atomic_compare_and_swap(&mut *self.v.get(), old, new, order) }
     }
 
-    /// Returns the old value (like __sync_fetch_and_add).
+    /// Add to the current value, returning the previous
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::atomics::{AtomicInt, SeqCst};
+    ///
+    /// let mut foo = AtomicInt::new(0);
+    /// assert_eq!(0, foo.fetch_add(10, SeqCst));
+    /// assert_eq!(10, foo.load(SeqCst));
+    /// ```
     #[inline]
     pub fn fetch_add(&mut self, val: int, order: Ordering) -> int {
-        unsafe { atomic_add(&mut self.v, val, order) }
+        unsafe { atomic_add(&mut *self.v.get(), val, order) }
     }
 
-    /// Returns the old value (like __sync_fetch_and_sub).
+    /// Subtract from the current value, returning the previous
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::atomics::{AtomicInt, SeqCst};
+    ///
+    /// let mut foo = AtomicInt::new(0);
+    /// assert_eq!(0, foo.fetch_sub(10, SeqCst));
+    /// assert_eq!(-10, foo.load(SeqCst));
+    /// ```
     #[inline]
     pub fn fetch_sub(&mut self, val: int, order: Ordering) -> int {
-        unsafe { atomic_sub(&mut self.v, val, order) }
+        unsafe { atomic_sub(&mut *self.v.get(), val, order) }
     }
 }
 
+// temporary workaround
+// it causes link failure on MIPS target
+// libgcc doesn't implement 64-bit atomic operations for MIPS32
+#[cfg(not(target_arch = "mips"))]
 impl AtomicU64 {
     pub fn new(v: u64) -> AtomicU64 {
-        AtomicU64 { v:v, nopod: marker::NoPod }
+        AtomicU64 { v: Unsafe::new(v), nopod: marker::NoPod }
     }
 
     #[inline]
     pub fn load(&self, order: Ordering) -> u64 {
-        unsafe { atomic_load(&self.v, order) }
+        unsafe { atomic_load(&*self.v.get(), order) }
     }
 
     #[inline]
     pub fn store(&mut self, val: u64, order: Ordering) {
-        unsafe { atomic_store(&mut self.v, val, order); }
+        unsafe { atomic_store(&mut *self.v.get(), val, order); }
     }
 
     #[inline]
     pub fn swap(&mut self, val: u64, order: Ordering) -> u64 {
-        unsafe { atomic_swap(&mut self.v, val, order) }
+        unsafe { atomic_swap(&mut *self.v.get(), val, order) }
     }
 
     #[inline]
     pub fn compare_and_swap(&mut self, old: u64, new: u64, order: Ordering) -> u64 {
-        unsafe { atomic_compare_and_swap(&mut self.v, old, new, order) }
+        unsafe { atomic_compare_and_swap(&mut *self.v.get(), old, new, order) }
     }
 
     #[inline]
     pub fn fetch_add(&mut self, val: u64, order: Ordering) -> u64 {
-        unsafe { atomic_add(&mut self.v, val, order) }
+        unsafe { atomic_add(&mut *self.v.get(), val, order) }
     }
 
     #[inline]
     pub fn fetch_sub(&mut self, val: u64, order: Ordering) -> u64 {
-        unsafe { atomic_sub(&mut self.v, val, order) }
+        unsafe { atomic_sub(&mut *self.v.get(), val, order) }
     }
 }
 
 impl AtomicUint {
+    /// Create a new `AtomicUint`
     pub fn new(v: uint) -> AtomicUint {
-        AtomicUint { v:v, nopod: marker::NoPod }
+        AtomicUint { v: Unsafe::new(v), nopod: marker::NoPod }
     }
 
+    /// Load the value
     #[inline]
     pub fn load(&self, order: Ordering) -> uint {
-        unsafe { atomic_load(&self.v, order) }
+        unsafe { atomic_load(&*self.v.get(), order) }
     }
 
+    /// Store the value
     #[inline]
     pub fn store(&mut self, val: uint, order: Ordering) {
-        unsafe { atomic_store(&mut self.v, val, order); }
+        unsafe { atomic_store(&mut *self.v.get(), val, order); }
     }
 
+    /// Store a value, returning the old value
     #[inline]
     pub fn swap(&mut self, val: uint, order: Ordering) -> uint {
-        unsafe { atomic_swap(&mut self.v, val, order) }
+        unsafe { atomic_swap(&mut *self.v.get(), val, order) }
     }
 
+    /// If the current value is the same as expected, store a new value
+    ///
+    /// Compare the current value with `old`; if they are the same then
+    /// replace the current value with `new`. Return the previous value.
+    /// If the return value is equal to `old` then the value was updated.
     #[inline]
     pub fn compare_and_swap(&mut self, old: uint, new: uint, order: Ordering) -> uint {
-        unsafe { atomic_compare_and_swap(&mut self.v, old, new, order) }
+        unsafe { atomic_compare_and_swap(&mut *self.v.get(), old, new, order) }
     }
 
-    /// Returns the old value (like __sync_fetch_and_add).
+    /// Add to the current value, returning the previous
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::atomics::{AtomicUint, SeqCst};
+    ///
+    /// let mut foo = AtomicUint::new(0);
+    /// assert_eq!(0, foo.fetch_add(10, SeqCst));
+    /// assert_eq!(10, foo.load(SeqCst));
+    /// ```
     #[inline]
     pub fn fetch_add(&mut self, val: uint, order: Ordering) -> uint {
-        unsafe { atomic_add(&mut self.v, val, order) }
+        unsafe { atomic_add(&mut *self.v.get(), val, order) }
     }
 
-    /// Returns the old value (like __sync_fetch_and_sub)..
+    /// Subtract from the current value, returning the previous
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::atomics::{AtomicUint, SeqCst};
+    ///
+    /// let mut foo = AtomicUint::new(10);
+    /// assert_eq!(10, foo.fetch_sub(10, SeqCst));
+    /// assert_eq!(0, foo.load(SeqCst));
+    /// ```
     #[inline]
     pub fn fetch_sub(&mut self, val: uint, order: Ordering) -> uint {
-        unsafe { atomic_sub(&mut self.v, val, order) }
+        unsafe { atomic_sub(&mut *self.v.get(), val, order) }
     }
 }
 
 impl<T> AtomicPtr<T> {
+    /// Create a new `AtomicPtr`
     pub fn new(p: *mut T) -> AtomicPtr<T> {
-        AtomicPtr { p: p as uint, nopod: marker::NoPod }
+        AtomicPtr { p: Unsafe::new(p as uint), nopod: marker::NoPod }
     }
 
+    /// Load the value
     #[inline]
     pub fn load(&self, order: Ordering) -> *mut T {
         unsafe {
-            atomic_load(&self.p, order) as *mut T
+            atomic_load(&*self.p.get(), order) as *mut T
         }
     }
 
+    /// Store the value
     #[inline]
     pub fn store(&mut self, ptr: *mut T, order: Ordering) {
-        unsafe { atomic_store(&mut self.p, ptr as uint, order); }
+        unsafe { atomic_store(&mut *self.p.get(), ptr as uint, order); }
     }
 
+    /// Store a value, returning the old value
     #[inline]
     pub fn swap(&mut self, ptr: *mut T, order: Ordering) -> *mut T {
-        unsafe { atomic_swap(&mut self.p, ptr as uint, order) as *mut T }
+        unsafe { atomic_swap(&mut *self.p.get(), ptr as uint, order) as *mut T }
     }
 
+    /// If the current value is the same as expected, store a new value
+    ///
+    /// Compare the current value with `old`; if they are the same then
+    /// replace the current value with `new`. Return the previous value.
+    /// If the return value is equal to `old` then the value was updated.
     #[inline]
     pub fn compare_and_swap(&mut self, old: *mut T, new: *mut T, order: Ordering) -> *mut T {
         unsafe {
-            atomic_compare_and_swap(&mut self.p, old as uint,
+            atomic_compare_and_swap(&mut *self.p.get(), old as uint,
                                     new as uint, order) as *mut T
         }
     }
 }
 
 impl<T> AtomicOption<T> {
+    /// Create a new `AtomicOption`
     pub fn new(p: ~T) -> AtomicOption<T> {
-        unsafe { AtomicOption { p: cast::transmute(p) } }
+        unsafe { AtomicOption { p: Unsafe::new(cast::transmute(p)) } }
     }
 
-    pub fn empty() -> AtomicOption<T> { AtomicOption { p: 0 } }
+    /// Create a new `AtomicOption` that doesn't contain a value
+    pub fn empty() -> AtomicOption<T> { AtomicOption { p: Unsafe::new(0) } }
 
+    /// Store a value, returning the old value
     #[inline]
     pub fn swap(&mut self, val: ~T, order: Ordering) -> Option<~T> {
         unsafe {
             let val = cast::transmute(val);
 
-            let p = atomic_swap(&mut self.p, val, order);
+            let p = atomic_swap(&mut *self.p.get(), val, order);
             if p as uint == 0 {
                 None
             } else {
@@ -351,20 +649,23 @@ impl<T> AtomicOption<T> {
         }
     }
 
+    /// Remove the value, leaving the `AtomicOption` empty.
     #[inline]
     pub fn take(&mut self, order: Ordering) -> Option<~T> {
         unsafe { self.swap(cast::transmute(0), order) }
     }
 
-    /// A compare-and-swap. Succeeds if the option is 'None' and returns 'None'
-    /// if so. If the option was already 'Some', returns 'Some' of the rejected
+    /// Replace an empty value with a non-empty value.
+    ///
+    /// Succeeds if the option is `None` and returns `None` if so. If
+    /// the option was already `Some`, returns `Some` of the rejected
     /// value.
     #[inline]
     pub fn fill(&mut self, val: ~T, order: Ordering) -> Option<~T> {
         unsafe {
             let val = cast::transmute(val);
             let expected = cast::transmute(0);
-            let oldval = atomic_compare_and_swap(&mut self.p, expected, val, order);
+            let oldval = atomic_compare_and_swap(&mut *self.p.get(), expected, val, order);
             if oldval == expected {
                 None
             } else {
@@ -373,11 +674,13 @@ impl<T> AtomicOption<T> {
         }
     }
 
+    /// Returns `true` if the `AtomicOption` is empty.
+    ///
     /// Be careful: The caller must have some external method of ensuring the
     /// result does not get invalidated by another task after this returns.
     #[inline]
     pub fn is_empty(&mut self, order: Ordering) -> bool {
-        unsafe { atomic_load(&self.p, order) as uint == 0 }
+        unsafe { atomic_load(&*self.p.get(), order) as uint == 0 }
     }
 }
 
@@ -499,32 +802,35 @@ pub unsafe fn atomic_xor<T>(dst: &mut T, val: T, order: Ordering) -> T {
 }
 
 
-/**
- * An atomic fence.
- *
- * A fence 'A' which has `Release` ordering semantics, synchronizes with a
- * fence 'B' with (at least) `Acquire` semantics, if and only if there exists
- * atomic operations X and Y, both operating on some atomic object 'M' such
- * that A is sequenced before X, Y is synchronized before B and Y observers
- * the change to M. This provides a happens-before dependence between A and B.
- *
- * Atomic operations with `Release` or `Acquire` semantics can also synchronize
- * with a fence.
- *
- * A fence with has `SeqCst` ordering, in addition to having both `Acquire` and
- * `Release` semantics, participates in the global program order of the other
- * `SeqCst` operations and/or fences.
- *
- * Accepts `Acquire`, `Release`, `AcqRel` and `SeqCst` orderings.
- */
+/// An atomic fence.
+///
+/// A fence 'A' which has `Release` ordering semantics, synchronizes with a
+/// fence 'B' with (at least) `Acquire` semantics, if and only if there exists
+/// atomic operations X and Y, both operating on some atomic object 'M' such
+/// that A is sequenced before X, Y is synchronized before B and Y observers
+/// the change to M. This provides a happens-before dependence between A and B.
+///
+/// Atomic operations with `Release` or `Acquire` semantics can also synchronize
+/// with a fence.
+///
+/// A fence with has `SeqCst` ordering, in addition to having both `Acquire` and
+/// `Release` semantics, participates in the global program order of the other
+/// `SeqCst` operations and/or fences.
+///
+/// Accepts `Acquire`, `Release`, `AcqRel` and `SeqCst` orderings.
+///
+/// # Failure
+///
+/// Fails if `order` is `Relaxed`
 #[inline]
 pub fn fence(order: Ordering) {
     unsafe {
         match order {
             Acquire => intrinsics::atomic_fence_acq(),
             Release => intrinsics::atomic_fence_rel(),
-            AcqRel  => intrinsics::atomic_fence_rel(),
-            _       => intrinsics::atomic_fence(),
+            AcqRel  => intrinsics::atomic_fence_acqrel(),
+            SeqCst  => intrinsics::atomic_fence(),
+            Relaxed => fail!("there is no such thing as a relaxed fence")
         }
     }
 }
@@ -535,13 +841,13 @@ mod test {
     use super::*;
 
     #[test]
-    fn flag() {
-        let mut flg = AtomicFlag::new();
-        assert!(!flg.test_and_set(SeqCst));
-        assert!(flg.test_and_set(SeqCst));
+    fn bool_() {
+        let mut a = AtomicBool::new(false);
+        assert_eq!(a.compare_and_swap(false, true, SeqCst), false);
+        assert_eq!(a.compare_and_swap(false, true, SeqCst), true);
 
-        flg.clear(SeqCst);
-        assert!(!flg.test_and_set(SeqCst));
+        a.store(false, SeqCst);
+        assert_eq!(a.compare_and_swap(false, true, SeqCst), false);
     }
 
     #[test]
@@ -591,7 +897,6 @@ mod test {
         assert_eq!(a.load(SeqCst),false);
     }
 
-    static mut S_FLAG : AtomicFlag = INIT_ATOMIC_FLAG;
     static mut S_BOOL : AtomicBool = INIT_ATOMIC_BOOL;
     static mut S_INT  : AtomicInt  = INIT_ATOMIC_INT;
     static mut S_UINT : AtomicUint = INIT_ATOMIC_UINT;
@@ -599,7 +904,6 @@ mod test {
     #[test]
     fn static_init() {
         unsafe {
-            assert!(!S_FLAG.test_and_set(SeqCst));
             assert!(!S_BOOL.load(SeqCst));
             assert!(S_INT.load(SeqCst) == 0);
             assert!(S_UINT.load(SeqCst) == 0);

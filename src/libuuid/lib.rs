@@ -58,23 +58,34 @@ Examples of string representations:
 #[crate_type = "rlib"];
 #[crate_type = "dylib"];
 #[license = "MIT/ASL2"];
+#[doc(html_logo_url = "http://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
+      html_favicon_url = "http://www.rust-lang.org/favicon.ico",
+      html_root_url = "http://static.rust-lang.org/doc/master")];
+
+#[feature(default_type_params)];
+
+// NOTE remove the following two attributes after the next snapshot.
+#[allow(unrecognized_lint)];
+#[allow(default_type_param_usage)];
 
 // test harness access
 #[cfg(test)]
 extern crate test;
+
+extern crate rand;
 extern crate serialize;
 
-use std::str;
-use std::vec;
-use std::num::FromStrRadix;
-use std::char::Char;
-use std::container::Container;
-use std::to_str::ToStr;
-use std::rand;
-use std::rand::Rng;
-use std::cmp::Eq;
 use std::cast::{transmute,transmute_copy};
-use std::to_bytes::{IterBytes, Cb};
+use std::char::Char;
+use std::default::Default;
+use std::fmt;
+use std::from_str::FromStr;
+use std::hash::Hash;
+use std::num::FromStrRadix;
+use std::str;
+use std::slice;
+
+use rand::Rng;
 
 use serialize::{Encoder, Encodable, Decoder, Decodable};
 
@@ -114,9 +125,10 @@ pub struct Uuid {
     /// The 128-bit number stored in 16 bytes
     bytes: UuidBytes
 }
-impl IterBytes for Uuid {
-    fn iter_bytes(&self, _: bool, f: Cb) -> bool {
-        f(self.bytes.slice_from(0))
+
+impl<S: Writer> Hash<S> for Uuid {
+    fn hash(&self, state: &mut S) {
+        self.bytes.hash(state)
     }
 }
 
@@ -142,22 +154,21 @@ pub enum ParseError {
 }
 
 /// Converts a ParseError to a string
-impl ToStr for ParseError {
-    #[inline]
-    fn to_str(&self) -> ~str {
+impl fmt::Show for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
             ErrorInvalidLength(found) =>
-                format!("Invalid length; expecting 32, 36 or 45 chars, found {}",
-                        found),
+                write!(f.buf, "Invalid length; expecting 32, 36 or 45 chars, \
+                               found {}", found),
             ErrorInvalidCharacter(found, pos) =>
-                format!("Invalid character; found `{}` (0x{:02x}) at offset {}",
-                        found, found as uint, pos),
+                write!(f.buf, "Invalid character; found `{}` (0x{:02x}) at \
+                               offset {}", found, found as uint, pos),
             ErrorInvalidGroups(found) =>
-                format!("Malformed; wrong number of groups: expected 1 or 5, found {}",
-                        found),
+                write!(f.buf, "Malformed; wrong number of groups: expected 1 \
+                               or 5, found {}", found),
             ErrorInvalidGroupLength(group, found, expecting) =>
-                format!("Malformed; length of group {} was {}, expecting {}",
-                        group, found, expecting),
+                write!(f.buf, "Malformed; length of group {} was {}, \
+                               expecting {}", group, found, expecting),
         }
     }
 }
@@ -189,7 +200,7 @@ impl Uuid {
     pub fn new_v4() -> Uuid {
         let ub = rand::task_rng().gen_vec(16);
         let mut uuid = Uuid{ bytes: [0, .. 16] };
-        vec::bytes::copy_memory(uuid.bytes, ub);
+        slice::bytes::copy_memory(uuid.bytes, ub);
         uuid.set_variant(VariantRFC4122);
         uuid.set_version(Version4Random);
         uuid
@@ -216,7 +227,7 @@ impl Uuid {
         fields.data1 = to_be32(d1 as i32) as u32;
         fields.data2 = to_be16(d2 as i16) as u16;
         fields.data3 = to_be16(d3 as i16) as u16;
-        vec::bytes::copy_memory(fields.data4, d4);
+        slice::bytes::copy_memory(fields.data4, d4);
 
         unsafe {
             transmute(fields)
@@ -233,7 +244,7 @@ impl Uuid {
         }
 
         let mut uuid = Uuid{ bytes: [0, .. 16] };
-        vec::bytes::copy_memory(uuid.bytes, b);
+        slice::bytes::copy_memory(uuid.bytes, b);
         Some(uuid)
     }
 
@@ -316,7 +327,7 @@ impl Uuid {
     ///
     /// Example: `936DA01F9ABD4d9d80C702AF85C822A8`
     pub fn to_simple_str(&self) -> ~str {
-        let mut s: ~[u8] = vec::from_elem(32, 0u8);
+        let mut s: ~[u8] = slice::from_elem(32, 0u8);
         for i in range(0u, 16u) {
             let digit = format!("{:02x}", self.bytes[i] as uint);
             s[i*2+0] = digit[0];
@@ -465,9 +476,9 @@ impl FromStr for Uuid {
 }
 
 /// Convert the UUID to a hexadecimal-based string representation
-impl ToStr for Uuid {
-    fn to_str(&self) -> ~str {
-        self.to_simple_str()
+impl fmt::Show for Uuid {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f.buf, "{}", self.to_simple_str())
     }
 }
 
@@ -510,7 +521,7 @@ impl rand::Rand for Uuid {
     fn rand<R: rand::Rng>(rng: &mut R) -> Uuid {
         let ub = rng.gen_vec(16);
         let mut uuid = Uuid{ bytes: [0, .. 16] };
-        vec::bytes::copy_memory(uuid.bytes, ub);
+        slice::bytes::copy_memory(uuid.bytes, ub);
         uuid.set_variant(VariantRFC4122);
         uuid.set_version(Version4Random);
         uuid
@@ -520,12 +531,12 @@ impl rand::Rand for Uuid {
 #[cfg(test)]
 mod test {
     extern crate collections;
+    extern crate rand;
 
     use super::{Uuid, VariantMicrosoft, VariantNCS, VariantRFC4122,
                 Version1Mac, Version2Dce, Version3Md5, Version4Random,
                 Version5Sha1};
     use std::str;
-    use std::rand;
     use std::io::MemWriter;
 
     #[test]
@@ -779,7 +790,7 @@ mod test {
 
     #[test]
     fn test_rand_rand() {
-        let mut rng = rand::rng();
+        let mut rng = rand::task_rng();
         let u: ~Uuid = rand::Rand::rand(&mut rng);
         let ub = u.as_bytes();
 

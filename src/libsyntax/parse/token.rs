@@ -11,6 +11,7 @@
 use ast;
 use ast::{P, Ident, Name, Mrk};
 use ast_util;
+use ext::mtwt;
 use parse::token;
 use util::interner::{RcStr, StrInterner};
 use util::interner;
@@ -23,7 +24,7 @@ use std::local_data;
 use std::path::BytesContainer;
 
 #[allow(non_camel_case_types)]
-#[deriving(Clone, Encodable, Decodable, Eq, IterBytes)]
+#[deriving(Clone, Encodable, Decodable, Eq, Hash, Show)]
 pub enum BinOp {
     PLUS,
     MINUS,
@@ -38,7 +39,7 @@ pub enum BinOp {
 }
 
 #[allow(non_camel_case_types)]
-#[deriving(Clone, Encodable, Decodable, Eq, IterBytes)]
+#[deriving(Clone, Encodable, Decodable, Eq, Hash, Show)]
 pub enum Token {
     /* Expression-operator symbols. */
     EQ,
@@ -102,7 +103,7 @@ pub enum Token {
     EOF,
 }
 
-#[deriving(Clone, Encodable, Decodable, Eq, IterBytes)]
+#[deriving(Clone, Encodable, Decodable, Eq, Hash)]
 /// For interpolation during macro expansion.
 pub enum Nonterminal {
     NtItem(@ast::Item),
@@ -115,7 +116,25 @@ pub enum Nonterminal {
     NtAttr(@ast::Attribute), // #[foo]
     NtPath(~ast::Path),
     NtTT(  @ast::TokenTree), // needs @ed to break a circularity
-    NtMatchers(~[ast::Matcher])
+    NtMatchers(Vec<ast::Matcher> )
+}
+
+impl fmt::Show for Nonterminal {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            NtItem(..) => f.pad("NtItem(..)"),
+            NtBlock(..) => f.pad("NtBlock(..)"),
+            NtStmt(..) => f.pad("NtStmt(..)"),
+            NtPat(..) => f.pad("NtPat(..)"),
+            NtExpr(..) => f.pad("NtExpr(..)"),
+            NtTy(..) => f.pad("NtTy(..)"),
+            NtIdent(..) => f.pad("NtIdent(..)"),
+            NtAttr(..) => f.pad("NtAttr(..)"),
+            NtPath(..) => f.pad("NtPath(..)"),
+            NtTT(..) => f.pad("NtTT(..)"),
+            NtMatchers(..) => f.pad("NtMatchers(..)"),
+        }
+    }
 }
 
 pub fn binop_to_str(o: BinOp) -> ~str {
@@ -394,13 +413,11 @@ macro_rules! declare_special_idents_and_keywords {(
         // The indices here must correspond to the numbers in
         // special_idents, in Keyword to_ident(), and in static
         // constants below.
-        let init_vec = ~[
-            $( $si_str, )*
-            $( $sk_str, )*
-            $( $rk_str, )*
-        ];
-
-        interner::StrInterner::prefill(init_vec)
+        let mut init_vec = Vec::new();
+        $(init_vec.push($si_str);)*
+        $(init_vec.push($sk_str);)*
+        $(init_vec.push($rk_str);)*
+        interner::StrInterner::prefill(init_vec.as_slice())
     }
 }}
 
@@ -444,41 +461,40 @@ declare_special_idents_and_keywords! {
         (20,                         Impl,       "impl");
         (21,                         In,         "in");
         (22,                         Let,        "let");
-        (23,                         __LogLevel, "__log_level");
-        (24,                         Loop,       "loop");
-        (25,                         Match,      "match");
-        (26,                         Mod,        "mod");
-        (27,                         Mut,        "mut");
-        (28,                         Once,       "once");
-        (29,                         Priv,       "priv");
-        (30,                         Pub,        "pub");
-        (31,                         Ref,        "ref");
-        (32,                         Return,     "return");
+        (23,                         Loop,       "loop");
+        (24,                         Match,      "match");
+        (25,                         Mod,        "mod");
+        (26,                         Mut,        "mut");
+        (27,                         Once,       "once");
+        (28,                         Priv,       "priv");
+        (29,                         Pub,        "pub");
+        (30,                         Ref,        "ref");
+        (31,                         Return,     "return");
         // Static and Self are also special idents (prefill de-dupes)
         (super::STATIC_KEYWORD_NAME, Static,     "static");
         (super::SELF_KEYWORD_NAME,   Self,       "self");
-        (33,                         Struct,     "struct");
-        (34,                         Super,      "super");
-        (35,                         True,       "true");
-        (36,                         Trait,      "trait");
-        (37,                         Type,       "type");
-        (38,                         Unsafe,     "unsafe");
-        (39,                         Use,        "use");
-        (40,                         While,      "while");
-        (41,                         Continue,   "continue");
-        (42,                         Proc,       "proc");
-        (43,                         Box,        "box");
+        (32,                         Struct,     "struct");
+        (33,                         Super,      "super");
+        (34,                         True,       "true");
+        (35,                         Trait,      "trait");
+        (36,                         Type,       "type");
+        (37,                         Unsafe,     "unsafe");
+        (38,                         Use,        "use");
+        (39,                         While,      "while");
+        (40,                         Continue,   "continue");
+        (41,                         Proc,       "proc");
+        (42,                         Box,        "box");
 
         'reserved:
-        (44,                         Alignof,    "alignof");
-        (45,                         Be,         "be");
-        (46,                         Offsetof,   "offsetof");
-        (47,                         Pure,       "pure");
-        (48,                         Sizeof,     "sizeof");
-        (49,                         Typeof,     "typeof");
-        (50,                         Unsized,    "unsized");
-        (51,                         Yield,      "yield");
-        (52,                         Do,         "do");
+        (43,                         Alignof,    "alignof");
+        (44,                         Be,         "be");
+        (45,                         Offsetof,   "offsetof");
+        (46,                         Pure,       "pure");
+        (47,                         Sizeof,     "sizeof");
+        (48,                         Typeof,     "typeof");
+        (49,                         Unsized,    "unsized");
+        (50,                         Yield,      "yield");
+        (51,                         Do,         "do");
     }
 }
 
@@ -536,7 +552,7 @@ pub fn get_ident_interner() -> @IdentInterner {
 /// destroyed. In particular, they must not access string contents. This can
 /// be fixed in the future by just leaking all strings until task death
 /// somehow.
-#[deriving(Clone, Eq, IterBytes, Ord, TotalEq, TotalOrd)]
+#[deriving(Clone, Eq, Hash, Ord, TotalEq, TotalOrd)]
 pub struct InternedString {
     priv string: RcStr,
 }
@@ -652,7 +668,7 @@ pub fn fresh_name(src: &ast::Ident) -> Name {
     // following: debug version. Could work in final except that it's incompatible with
     // good error messages and uses of struct names in ambiguous could-be-binding
     // locations. Also definitely destroys the guarantee given above about ptr_eq.
-    /*let num = rand::rng().gen_uint_range(0,0xffff);
+    /*let num = rand::task_rng().gen_uint_range(0,0xffff);
     gensym(format!("{}_{}",ident_to_str(src),num))*/
 }
 
@@ -704,8 +720,8 @@ pub fn is_reserved_keyword(tok: &Token) -> bool {
 
 pub fn mtwt_token_eq(t1 : &Token, t2 : &Token) -> bool {
     match (t1,t2) {
-        (&IDENT(id1,_),&IDENT(id2,_)) =>
-        ast_util::mtwt_resolve(id1) == ast_util::mtwt_resolve(id2),
+        (&IDENT(id1,_),&IDENT(id2,_)) | (&LIFETIME(id1),&LIFETIME(id2)) =>
+            mtwt::resolve(id1) == mtwt::resolve(id2),
         _ => *t1 == *t2
     }
 }
@@ -715,10 +731,10 @@ pub fn mtwt_token_eq(t1 : &Token, t2 : &Token) -> bool {
 mod test {
     use super::*;
     use ast;
-    use ast_util;
+    use ext::mtwt;
 
     fn mark_ident(id : ast::Ident, m : ast::Mrk) -> ast::Ident {
-        ast::Ident{name:id.name,ctxt:ast_util::new_mark(m,id.ctxt)}
+        ast::Ident{name:id.name,ctxt:mtwt::new_mark(m,id.ctxt)}
     }
 
     #[test] fn mtwt_token_eq_test() {

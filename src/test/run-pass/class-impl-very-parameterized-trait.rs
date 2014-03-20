@@ -12,6 +12,7 @@
 
 use std::cmp;
 
+#[deriving(Show)]
 enum cat_type { tuxedo, tabby, tortoiseshell }
 
 impl cmp::Eq for cat_type {
@@ -38,11 +39,11 @@ impl<T> cat<T> {
 
     pub fn eat(&mut self) -> bool {
         if self.how_hungry > 0 {
-            error!("OM NOM NOM");
+            println!("OM NOM NOM");
             self.how_hungry -= 2;
             return true;
         } else {
-            error!("Not hungry!");
+            println!("Not hungry!");
             return false;
         }
     }
@@ -106,7 +107,7 @@ impl<T> cat<T> {
 impl<T> cat<T> {
     fn meow(&mut self) {
         self.meows += 1;
-        error!("Meow {}", self.meows);
+        println!("Meow {}", self.meows);
         if self.meows % 5 == 0 {
             self.how_hungry += 1;
         }

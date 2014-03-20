@@ -8,8 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[allow(non_camel_case_types)];
-
 use std::cast;
 use std::io::net::ip;
 use std::io;
@@ -18,8 +16,7 @@ use std::mem;
 use std::rt::rtio;
 use std::sync::arc::UnsafeArc;
 
-use super::{IoResult, retry};
-use super::file::keep_going;
+use super::{IoResult, retry, keep_going};
 
 ////////////////////////////////////////////////////////////////////////////////
 // sockaddr and misc bindings
@@ -309,7 +306,7 @@ impl rtio::RtioTcpStream for TcpStream {
         let ret = retry(|| {
             unsafe {
                 libc::recv(self.fd(),
-                           buf.as_ptr() as *mut libc::c_void,
+                           buf.as_mut_ptr() as *mut libc::c_void,
                            buf.len() as wrlen,
                            0) as libc::c_int
             }
@@ -323,16 +320,14 @@ impl rtio::RtioTcpStream for TcpStream {
         }
     }
     fn write(&mut self, buf: &[u8]) -> IoResult<()> {
-        let ret = keep_going(buf, |buf, len| {
-            unsafe {
-                libc::send(self.fd(),
-                           buf as *mut libc::c_void,
-                           len as wrlen,
-                           0) as i64
-            }
+        let ret = keep_going(buf, |buf, len| unsafe {
+            libc::send(self.fd(),
+                       buf as *mut libc::c_void,
+                       len as wrlen,
+                       0) as i64
         });
         if ret < 0 {
-            Err(last_error())
+            Err(super::last_error())
         } else {
             Ok(())
         }
@@ -355,6 +350,11 @@ impl rtio::RtioTcpStream for TcpStream {
 
     fn clone(&self) -> ~rtio::RtioTcpStream {
         ~TcpStream { inner: self.inner.clone() } as ~rtio::RtioTcpStream
+    }
+    fn close_write(&mut self) -> IoResult<()> {
+        super::mkerr_libc(unsafe {
+            libc::shutdown(self.fd(), libc::SHUT_WR)
+        })
     }
 }
 

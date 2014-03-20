@@ -17,7 +17,6 @@ use clone::Clone;
 #[cfg(not(test))] use default::Default;
 use fmt;
 use result::{Ok, Err};
-use to_str::ToStr;
 
 // macro for implementing n-ary tuple functions and operations
 macro_rules! tuple_impls {
@@ -116,12 +115,6 @@ macro_rules! tuple_impls {
                 #[inline]
                 fn default() -> ($($T,)+) {
                     ($({ let x: $T = Default::default(); x},)+)
-                }
-            }
-
-            impl<$($T: fmt::Show),+> ToStr for ($($T,)+) {
-                fn to_str(&self) -> ~str {
-                    format!("{}", *self)
                 }
             }
 
@@ -352,10 +345,10 @@ mod tests {
         assert!(!big.equals(&small));
 
         // TotalOrd
-        assert_eq!(small.cmp(&small), Equal);
-        assert_eq!(big.cmp(&big), Equal);
-        assert_eq!(small.cmp(&big), Less);
-        assert_eq!(big.cmp(&small), Greater);
+        assert!(small.cmp(&small) == Equal);
+        assert!(big.cmp(&big) == Equal);
+        assert!(small.cmp(&big) == Less);
+        assert!(big.cmp(&small) == Greater);
     }
 
     #[test]

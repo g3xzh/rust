@@ -24,7 +24,9 @@ pub enum ArgKind {
     /// LLVM type or by coercing to another specified type
     Direct,
     /// Pass the argument indirectly via a hidden pointer
-    Indirect
+    Indirect,
+    /// Ignore the argument (useful for empty struct)
+    Ignore,
 }
 
 /// Information about how a specific C type
@@ -67,12 +69,26 @@ impl ArgType {
         }
     }
 
+    pub fn ignore(ty: Type) -> ArgType {
+        ArgType {
+            kind: Ignore,
+            ty: ty,
+            cast: None,
+            pad: None,
+            attr: None,
+        }
+    }
+
     pub fn is_direct(&self) -> bool {
         return self.kind == Direct;
     }
 
     pub fn is_indirect(&self) -> bool {
         return self.kind == Indirect;
+    }
+
+    pub fn is_ignore(&self) -> bool {
+        return self.kind == Ignore;
     }
 }
 
@@ -83,7 +99,7 @@ impl ArgType {
 /// comments are reverse-engineered and may be inaccurate. -NDM
 pub struct FnType {
     /// The LLVM types of each argument.
-    arg_tys: ~[ArgType],
+    arg_tys: Vec<ArgType> ,
 
     /// LLVM return type.
     ret_ty: ArgType,
@@ -93,7 +109,7 @@ pub fn compute_abi_info(ccx: &CrateContext,
                         atys: &[Type],
                         rty: Type,
                         ret_def: bool) -> FnType {
-    match ccx.sess.targ_cfg.arch {
+    match ccx.sess().targ_cfg.arch {
         X86 => cabi_x86::compute_abi_info(ccx, atys, rty, ret_def),
         X86_64 => cabi_x86_64::compute_abi_info(ccx, atys, rty, ret_def),
         Arm => cabi_arm::compute_abi_info(ccx, atys, rty, ret_def),

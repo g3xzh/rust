@@ -22,19 +22,20 @@ This API is completely unstable and subject to change.
 #[license = "MIT/ASL2"];
 #[crate_type = "dylib"];
 #[crate_type = "rlib"];
-#[doc(html_logo_url = "http://www.rust-lang.org/logos/rust-logo-128x128-blk.png",
+#[doc(html_logo_url = "http://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
       html_favicon_url = "http://www.rust-lang.org/favicon.ico",
       html_root_url = "http://static.rust-lang.org/doc/master")];
 
-#[feature(macro_rules, globs, managed_boxes)];
-#[allow(unknown_features)];// Note: remove it after a snapshot.
-#[feature(quote)];
-
-#[deny(non_camel_case_types)];
+#[feature(macro_rules, globs, managed_boxes, default_type_params, phase,
+          quote)];
+#[allow(deprecated_owned_vector)]; // NOTE: remove after stage0
+#[allow(deprecated)];
 
 extern crate serialize;
 extern crate term;
 extern crate collections;
+#[phase(syntax, link)]
+extern crate log;
 
 pub mod util {
     pub mod interner;
@@ -86,6 +87,7 @@ pub mod ext {
         pub mod macro_rules;
     }
 
+    pub mod mtwt;
 
     pub mod cfg;
     pub mod fmt;

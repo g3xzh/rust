@@ -12,12 +12,16 @@
 // ignore-android (FIXME #11419)
 // exec-env:RUST_LOG=info
 
+#[feature(phase)];
+
 #[no_uv];
 extern crate native;
+#[phase(syntax, link)]
+extern crate log;
 
 use std::fmt;
-use std::io::{PortReader, ChanWriter};
-use std::logging::{set_logger, Logger};
+use std::io::{ChanReader, ChanWriter};
+use log::{set_logger, Logger};
 
 struct MyWriter(ChanWriter);
 
@@ -36,8 +40,8 @@ fn start(argc: int, argv: **u8) -> int {
 }
 
 fn main() {
-    let (p, c) = Chan::new();
-    let (mut r, w) = (PortReader::new(p), ChanWriter::new(c));
+    let (tx, rx) = channel();
+    let (mut r, w) = (ChanReader::new(rx), ChanWriter::new(tx));
     spawn(proc() {
         set_logger(~MyWriter(w) as ~Logger);
         debug!("debug");

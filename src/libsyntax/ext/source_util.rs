@@ -57,7 +57,7 @@ pub fn expand_file(cx: &mut ExtCtxt, sp: Span, tts: &[ast::TokenTree])
 
     let topmost = topmost_expn_info(cx.backtrace().unwrap());
     let loc = cx.codemap().lookup_char_pos(topmost.call_site.lo);
-    let filename = token::intern_and_get_ident(loc.file.name);
+    let filename = token::intern_and_get_ident(loc.file.deref().name);
     base::MRExpr(cx.expr_str(topmost.call_site, filename))
 }
 
@@ -117,7 +117,7 @@ pub fn expand_include_str(cx: &mut ExtCtxt, sp: Span, tts: &[ast::TokenTree])
             // dependency information
             let filename = file.display().to_str();
             let interned = token::intern_and_get_ident(src);
-            cx.parse_sess.cm.new_filemap(filename, src);
+            cx.codemap().new_filemap(filename, src);
 
             base::MRExpr(cx.expr_str(sp, interned))
         }
@@ -142,6 +142,7 @@ pub fn expand_include_bin(cx: &mut ExtCtxt, sp: Span, tts: &[ast::TokenTree])
             return MacResult::dummy_expr(sp);
         }
         Ok(bytes) => {
+            let bytes = bytes.iter().map(|x| *x).collect();
             base::MRExpr(cx.expr_lit(sp, ast::LitBinary(Rc::new(bytes))))
         }
     }

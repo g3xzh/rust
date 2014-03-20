@@ -161,9 +161,7 @@ pub mod reader {
         ];
 
         unsafe {
-            let (ptr, _): (*u8, uint) = transmute(data);
-            let ptr = ptr.offset(start as int);
-            let ptr: *i32 = transmute(ptr);
+            let ptr = data.as_ptr().offset(start as int) as *i32;
             let val = from_be32(*ptr) as u32;
 
             let i = (val >> 28u) as uint;
@@ -1043,8 +1041,8 @@ mod bench {
 
     #[bench]
     pub fn vuint_at_A_aligned(bh: &mut BenchHarness) {
-        use std::vec;
-        let data = vec::from_fn(4*100, |i| {
+        use std::slice;
+        let data = slice::from_fn(4*100, |i| {
             match i % 2 {
               0 => 0x80u8,
               _ => i as u8,
@@ -1062,8 +1060,8 @@ mod bench {
 
     #[bench]
     pub fn vuint_at_A_unaligned(bh: &mut BenchHarness) {
-        use std::vec;
-        let data = vec::from_fn(4*100+1, |i| {
+        use std::slice;
+        let data = slice::from_fn(4*100+1, |i| {
             match i % 2 {
               1 => 0x80u8,
               _ => i as u8
@@ -1081,8 +1079,8 @@ mod bench {
 
     #[bench]
     pub fn vuint_at_D_aligned(bh: &mut BenchHarness) {
-        use std::vec;
-        let data = vec::from_fn(4*100, |i| {
+        use std::slice;
+        let data = slice::from_fn(4*100, |i| {
             match i % 4 {
               0 => 0x10u8,
               3 => i as u8,
@@ -1101,8 +1099,8 @@ mod bench {
 
     #[bench]
     pub fn vuint_at_D_unaligned(bh: &mut BenchHarness) {
-        use std::vec;
-        let data = vec::from_fn(4*100+1, |i| {
+        use std::slice;
+        let data = slice::from_fn(4*100+1, |i| {
             match i % 4 {
               1 => 0x10u8,
               0 => i as u8,

@@ -8,46 +8,57 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// Support code for rustc's built in test runner generator. Currently,
-// none of this is meant for users. It is intended to support the
-// simplest interface possible for representing and running tests
-// while providing a base that other test frameworks may build off of.
+//! Support code for rustc's built in unit-test and micro-benchmarking
+//! framework.
+//!
+//! Almost all user code will only be interested in `BenchHarness` and
+//! `black_box`. All other interactions (such as writing tests and
+//! benchmarks themselves) should be done via the `#[test]` and
+//! `#[bench]` attributes.
+//!
+//! See the [Testing Guide](../guide-testing.html) for more details.
+
+// Currently, not much of this is meant for users. It is intended to
+// support the simplest interface possible for representing and
+// running tests while providing a base that other test frameworks may
+// build off of.
 
 #[crate_id = "test#0.10-pre"];
 #[comment = "Rust internal test library only used by rustc"];
 #[license = "MIT/ASL2"];
 #[crate_type = "rlib"];
 #[crate_type = "dylib"];
+#[doc(html_logo_url = "http://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
+      html_favicon_url = "http://www.rust-lang.org/favicon.ico",
+      html_root_url = "http://static.rust-lang.org/doc/master")];
 
-#[feature(asm)];
+#[feature(asm, macro_rules)];
 
 extern crate collections;
-extern crate extra;
 extern crate getopts;
 extern crate serialize;
 extern crate term;
 extern crate time;
 
 use collections::TreeMap;
-use extra::json::ToJson;
-use extra::json;
-use extra::stats::Stats;
-use extra::stats;
+use stats::Stats;
 use time::precise_time_ns;
 use getopts::{OptGroup, optflag, optopt};
-use serialize::Decodable;
+use serialize::{json, Decodable};
+use serialize::json::ToJson;
 use term::Terminal;
 use term::color::{Color, RED, YELLOW, GREEN, CYAN};
 
 use std::cmp;
-use std::io;
-use std::io::{File, PortReader, ChanWriter};
+use std::f64;
+use std::fmt;
+use std::from_str::FromStr;
 use std::io::stdio::StdWriter;
+use std::io::{File, ChanReader, ChanWriter};
+use std::io;
+use std::os;
 use std::str;
 use std::task;
-use std::to_str::ToStr;
-use std::f64;
-use std::os;
 
 // to be used by rustc to compile tests in libtest
 pub mod test {
@@ -57,8 +68,10 @@ pub mod test {
              MetricChange, Improvement, Regression, LikelyNoise,
              StaticTestFn, StaticTestName, DynTestName, DynTestFn,
              run_test, test_main, test_main_static, filter_tests,
-             parse_opts};
+             parse_opts, StaticBenchFn};
 }
+
+pub mod stats;
 
 // The name of a test. By convention this follows the rules for rust
 // paths; i.e. it should be a series of identifiers separated by double
@@ -70,11 +83,11 @@ pub enum TestName {
     StaticTestName(&'static str),
     DynTestName(~str)
 }
-impl ToStr for TestName {
-    fn to_str(&self) -> ~str {
-        match (*self).clone() {
-            StaticTestName(s) => s.to_str(),
-            DynTestName(s) => s.to_str()
+impl fmt::Show for TestName {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            StaticTestName(s) => f.buf.write_str(s),
+            DynTestName(ref s) => f.buf.write_str(s.as_slice()),
         }
     }
 }
@@ -106,8 +119,8 @@ pub trait TDynBenchFn {
 // may need to come up with a more clever definition of test in order
 // to support isolation of tests into tasks.
 pub enum TestFn {
-    StaticTestFn(extern fn()),
-    StaticBenchFn(extern fn(&mut BenchHarness)),
+    StaticTestFn(fn()),
+    StaticBenchFn(fn(&mut BenchHarness)),
     StaticMetricFn(proc(&mut MetricMap)),
     DynTestFn(proc()),
     DynMetricFn(proc(&mut MetricMap)),
@@ -127,7 +140,11 @@ impl TestFn {
     }
 }
 
-// Structure passed to BenchFns
+/// Manager of the benchmarking runs.
+///
+/// This is feed into functions marked with `#[bench]` to allow for
+/// set-up & tear-down before running a piece of code repeatedly via a
+/// call to `iter`.
 pub struct BenchHarness {
     priv iterations: u64,
     priv ns_start: u64,
@@ -149,7 +166,7 @@ pub struct TestDescAndFn {
     testfn: TestFn,
 }
 
-#[deriving(Clone, Encodable, Decodable, Eq)]
+#[deriving(Clone, Encodable, Decodable, Eq, Show)]
 pub struct Metric {
     priv value: f64,
     priv noise: f64
@@ -172,7 +189,7 @@ impl Clone for MetricMap {
 }
 
 /// Analysis of a single change in metric
-#[deriving(Eq)]
+#[deriving(Eq, Show)]
 pub enum MetricChange {
     LikelyNoise,
     MetricAdded,
@@ -401,8 +418,8 @@ impl<T: Writer> ConsoleTestState<T> {
             Some(ref path) => Some(try!(File::create(path))),
             None => None
         };
-        let out = match term::Terminal::new(io::stdout()) {
-            Err(_) => Raw(io::stdout()),
+        let out = match term::Terminal::new(io::stdio::stdout_raw()) {
+            Err(_) => Raw(io::stdio::stdout_raw()),
             Ok(t) => Pretty(t)
         };
         Ok(ConsoleTestState {
@@ -609,7 +626,7 @@ impl<T: Writer> ConsoleTestState<T> {
         let ratchet_success = match *ratchet_metrics {
             None => true,
             Some(ref pth) => {
-                try!(self.write_plain(format!("\nusing metrics ratcher: {}\n",
+                try!(self.write_plain(format!("\nusing metrics ratchet: {}\n",
                                         pth.display())));
                 match ratchet_pct {
                     None => (),
@@ -674,7 +691,6 @@ pub fn run_tests_console(opts: &TestOpts,
                          tests: ~[TestDescAndFn]) -> io::IoResult<bool> {
     fn callback<T: Writer>(event: &TestEvent,
                            st: &mut ConsoleTestState<T>) -> io::IoResult<()> {
-        debug!("callback(event={:?})", event);
         match (*event).clone() {
             TeFiltered(ref filtered_tests) => st.write_run_start(filtered_tests.len()),
             TeWait(ref test, padding) => st.write_test_start(test, padding),
@@ -718,7 +734,6 @@ pub fn run_tests_console(opts: &TestOpts,
     match tests.iter().max_by(|t|len_if_padded(*t)) {
         Some(t) => {
             let n = t.desc.name.to_str();
-            debug!("Setting max_name_len from: {}", n);
             st.max_name_len = n.len();
         },
         None => {}
@@ -807,13 +822,12 @@ fn run_tests(opts: &TestOpts,
     // It's tempting to just spawn all the tests at once, but since we have
     // many tests that run in other processes we would be making a big mess.
     let concurrency = get_concurrency();
-    debug!("using {} test tasks", concurrency);
 
     let mut remaining = filtered_tests;
     remaining.reverse();
     let mut pending = 0;
 
-    let (p, ch) = Chan::<MonitorMsg>::new();
+    let (tx, rx) = channel::<MonitorMsg>();
 
     while pending > 0 || !remaining.is_empty() {
         while pending < concurrency && !remaining.is_empty() {
@@ -824,11 +838,11 @@ fn run_tests(opts: &TestOpts,
                 // that hang forever.
                 try!(callback(TeWait(test.desc.clone(), test.testfn.padding())));
             }
-            run_test(!opts.run_tests, test, ch.clone());
+            run_test(!opts.run_tests, test, tx.clone());
             pending += 1;
         }
 
-        let (desc, result, stdout) = p.recv();
+        let (desc, result, stdout) = rx.recv();
         if concurrency != 1 {
             try!(callback(TeWait(desc.clone(), PadNone)));
         }
@@ -840,8 +854,8 @@ fn run_tests(opts: &TestOpts,
     // (this includes metric fns)
     for b in filtered_benchs_and_metrics.move_iter() {
         try!(callback(TeWait(b.desc.clone(), b.testfn.padding())));
-        run_test(!opts.run_benchmarks, b, ch.clone());
-        let (test, result, stdout) = p.recv();
+        run_test(!opts.run_benchmarks, b, tx.clone());
+        let (test, result, stdout) = rx.recv();
         try!(callback(TeResult(test, result, stdout)));
     }
     Ok(())
@@ -924,7 +938,7 @@ pub fn filter_tests(
 
 pub fn run_test(force_ignore: bool,
                 test: TestDescAndFn,
-                monitor_ch: Chan<MonitorMsg>) {
+                monitor_ch: Sender<MonitorMsg>) {
 
     let TestDescAndFn {desc, testfn} = test;
 
@@ -934,13 +948,13 @@ pub fn run_test(force_ignore: bool,
     }
 
     fn run_test_inner(desc: TestDesc,
-                      monitor_ch: Chan<MonitorMsg>,
+                      monitor_ch: Sender<MonitorMsg>,
                       testfn: proc()) {
         spawn(proc() {
-            let (p, c) = Chan::new();
-            let mut reader = PortReader::new(p);
-            let stdout = ChanWriter::new(c.clone());
-            let stderr = ChanWriter::new(c);
+            let (tx, rx) = channel();
+            let mut reader = ChanReader::new(rx);
+            let stdout = ChanWriter::new(tx.clone());
+            let stderr = ChanWriter::new(tx);
             let mut task = task::task().named(match desc.name {
                 DynTestName(ref name) => name.clone().into_maybe_owned(),
                 StaticTestName(name) => name.into_maybe_owned(),
@@ -1049,13 +1063,13 @@ impl MetricMap {
                 Some(v) => {
                     let delta = v.value - vold.value;
                     let noise = match noise_pct {
-                        None => f64::max(vold.noise.abs(), v.noise.abs()),
+                        None => vold.noise.abs().max(v.noise.abs()),
                         Some(pct) => vold.value * pct / 100.0
                     };
                     if delta.abs() <= noise {
                         LikelyNoise
                     } else {
-                        let pct = delta.abs() / cmp::max(vold.value, f64::EPSILON) * 100.0;
+                        let pct = delta.abs() / vold.value.max(f64::EPSILON) * 100.0;
                         if vold.noise < 0.0 {
                             // When 'noise' is negative, it means we want
                             // to see deltas that go up over time, and can
@@ -1133,7 +1147,6 @@ impl MetricMap {
         });
 
         if ok {
-            debug!("rewriting file '{:?}' with updated metrics", p);
             self.save(p).unwrap();
         }
         return (diff, ok)
@@ -1184,8 +1197,6 @@ impl BenchHarness {
 
     pub fn bench_n(&mut self, n: u64, f: |&mut BenchHarness|) {
         self.iterations = n;
-        debug!("running benchmark for {} iterations",
-               n as uint);
         f(self);
     }
 
@@ -1210,9 +1221,6 @@ impl BenchHarness {
         // (i.e. larger error bars).
         if n == 0 { n = 1; }
 
-        debug!("Initial run took {} ns, iter count that takes 1ms estimated as {}",
-               self.ns_per_iter(), n);
-
         let mut total_run = 0;
         let samples : &mut [f64] = [0.0_f64, ..50];
         loop {
@@ -1233,12 +1241,6 @@ impl BenchHarness {
 
             stats::winsorize(samples, 5.0);
             let summ5 = stats::Summary::new(samples);
-
-            debug!("{} samples, median {}, MAD={}, MADP={}",
-                   samples.len(),
-                   summ.median as f64,
-                   summ.median_abs_dev as f64,
-                   summ.median_abs_dev_pct as f64);
 
             let now = precise_time_ns();
             let loop_run = now - loop_start;
@@ -1294,7 +1296,7 @@ mod tests {
                Metric, MetricMap, MetricAdded, MetricRemoved,
                Improvement, Regression, LikelyNoise,
                StaticTestName, DynTestName, DynTestFn};
-    use extra::tempfile::TempDir;
+    use std::io::TempDir;
 
     #[test]
     pub fn do_not_run_ignored_tests() {
@@ -1307,9 +1309,9 @@ mod tests {
             },
             testfn: DynTestFn(proc() f()),
         };
-        let (p, ch) = Chan::new();
-        run_test(false, desc, ch);
-        let (_, res, _) = p.recv();
+        let (tx, rx) = channel();
+        run_test(false, desc, tx);
+        let (_, res, _) = rx.recv();
         assert!(res != TrOk);
     }
 
@@ -1324,10 +1326,10 @@ mod tests {
             },
             testfn: DynTestFn(proc() f()),
         };
-        let (p, ch) = Chan::new();
-        run_test(false, desc, ch);
-        let (_, res, _) = p.recv();
-        assert_eq!(res, TrIgnored);
+        let (tx, rx) = channel();
+        run_test(false, desc, tx);
+        let (_, res, _) = rx.recv();
+        assert!(res == TrIgnored);
     }
 
     #[test]
@@ -1341,10 +1343,10 @@ mod tests {
             },
             testfn: DynTestFn(proc() f()),
         };
-        let (p, ch) = Chan::new();
-        run_test(false, desc, ch);
-        let (_, res, _) = p.recv();
-        assert_eq!(res, TrOk);
+        let (tx, rx) = channel();
+        run_test(false, desc, tx);
+        let (_, res, _) = rx.recv();
+        assert!(res == TrOk);
     }
 
     #[test]
@@ -1358,10 +1360,10 @@ mod tests {
             },
             testfn: DynTestFn(proc() f()),
         };
-        let (p, ch) = Chan::new();
-        run_test(false, desc, ch);
-        let (_, res, _) = p.recv();
-        assert_eq!(res, TrFailed);
+        let (tx, rx) = channel();
+        run_test(false, desc, tx);
+        let (_, res, _) = rx.recv();
+        assert!(res == TrFailed);
     }
 
     #[test]
@@ -1575,4 +1577,3 @@ mod tests {
         assert_eq!(*(m4.find(&~"throughput").unwrap()), Metric::new(50.0, 2.0));
     }
 }
-

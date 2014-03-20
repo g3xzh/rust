@@ -18,7 +18,7 @@ use util::common::time;
 use std::libc;
 use flate;
 
-pub fn run(sess: session::Session, llmod: ModuleRef,
+pub fn run(sess: &session::Session, llmod: ModuleRef,
            tm: TargetMachineRef, reachable: &[~str]) {
     if sess.opts.cg.prefer_dynamic {
         sess.err("cannot prefer dynamic linking when performing LTO");
@@ -58,7 +58,7 @@ pub fn run(sess: session::Session, llmod: ModuleRef,
         let bc = bc.expect("missing bytecode in archive!");
         let bc = time(sess.time_passes(), format!("inflate {}.bc", name), (), |_|
                       flate::inflate_bytes(bc));
-        let ptr = bc.as_ptr();
+        let ptr = bc.as_slice().as_ptr();
         debug!("linking {}", name);
         time(sess.time_passes(), format!("ll link {}", name), (), |()| unsafe {
             if !llvm::LLVMRustLinkInExternalBitcode(llmod,

@@ -11,12 +11,12 @@
 // This file was auto-generated using 'src/etc/generate-keyword-span-tests.py'
 
 #[feature(struct_variant)];
-extern crate extra;
+extern crate rand;
 
-#[deriving(TotalEq)]
+#[deriving(Eq, Ord, TotalEq)]
 struct Error;
 
-#[deriving(TotalOrd,TotalEq)]
+#[deriving(Eq, Ord, TotalOrd,TotalEq)]
 struct Struct(
     Error //~ ERROR
 );

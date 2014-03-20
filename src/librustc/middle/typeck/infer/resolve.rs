@@ -80,10 +80,10 @@ pub static resolve_and_force_all_but_regions: uint =
     (resolve_all | force_all) & not_regions;
 
 pub struct ResolveState<'a> {
-    infcx: &'a InferCtxt,
+    infcx: &'a InferCtxt<'a>,
     modes: uint,
     err: Option<fixup_err>,
-    v_seen: ~[TyVid],
+    v_seen: Vec<TyVid> ,
     type_depth: uint
 }
 
@@ -92,13 +92,13 @@ pub fn resolver<'a>(infcx: &'a InferCtxt, modes: uint) -> ResolveState<'a> {
         infcx: infcx,
         modes: modes,
         err: None,
-        v_seen: ~[],
+        v_seen: Vec::new(),
         type_depth: 0
     }
 }
 
 impl<'a> ty_fold::TypeFolder for ResolveState<'a> {
-    fn tcx(&self) -> ty::ctxt {
+    fn tcx<'a>(&'a self) -> &'a ty::ctxt {
         self.infcx.tcx
     }
 

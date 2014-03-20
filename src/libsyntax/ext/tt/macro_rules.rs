@@ -25,14 +25,15 @@ use parse::token::{special_idents, gensym_ident};
 use parse::token::{FAT_ARROW, SEMI, NtMatchers, NtTT, EOF};
 use parse::token;
 use print;
-use std::cell::RefCell;
 use util::small_vector::SmallVector;
 
-struct ParserAnyMacro {
-    parser: RefCell<Parser>,
+use std::cell::RefCell;
+
+struct ParserAnyMacro<'a> {
+    parser: RefCell<Parser<'a>>,
 }
 
-impl ParserAnyMacro {
+impl<'a> ParserAnyMacro<'a> {
     /// Make sure we don't have any tokens left to parse, so we don't
     /// silently drop anything. `allow_semi` is so that "optional"
     /// semilons at the end of normal expressions aren't complained
@@ -55,7 +56,7 @@ impl ParserAnyMacro {
     }
 }
 
-impl AnyMacro for ParserAnyMacro {
+impl<'a> AnyMacro for ParserAnyMacro<'a> {
     fn make_expr(&self) -> @ast::Expr {
         let ret = {
             let mut parser = self.parser.borrow_mut();
@@ -90,8 +91,8 @@ impl AnyMacro for ParserAnyMacro {
 
 struct MacroRulesMacroExpander {
     name: Ident,
-    lhses: @~[@NamedMatch],
-    rhses: @~[@NamedMatch],
+    lhses: @Vec<@NamedMatch> ,
+    rhses: @Vec<@NamedMatch> ,
 }
 
 impl MacroExpander for MacroRulesMacroExpander {
@@ -100,7 +101,12 @@ impl MacroExpander for MacroRulesMacroExpander {
               sp: Span,
               arg: &[ast::TokenTree])
               -> MacResult {
-        generic_extension(cx, sp, self.name, arg, *self.lhses, *self.rhses)
+        generic_extension(cx,
+                          sp,
+                          self.name,
+                          arg,
+                          self.lhses.as_slice(),
+                          self.rhses.as_slice())
     }
 }
 
@@ -115,21 +121,25 @@ fn generic_extension(cx: &ExtCtxt,
     if cx.trace_macros() {
         println!("{}! \\{ {} \\}",
                  token::get_ident(name),
-                 print::pprust::tt_to_str(&TTDelim(@arg.to_owned())));
+                 print::pprust::tt_to_str(&TTDelim(@arg.iter()
+                                                       .map(|x| (*x).clone())
+                                                       .collect())));
     }
 
     // Which arm's failure should we report? (the one furthest along)
     let mut best_fail_spot = DUMMY_SP;
     let mut best_fail_msg = ~"internal error: ran no matchers";
 
-    let s_d = cx.parse_sess().span_diagnostic;
-
     for (i, lhs) in lhses.iter().enumerate() { // try each arm's matchers
         match **lhs {
           MatchedNonterminal(NtMatchers(ref mtcs)) => {
             // `None` is because we're not interpolating
-            let arg_rdr = new_tt_reader(s_d, None, arg.to_owned());
-            match parse(cx.parse_sess(), cx.cfg(), arg_rdr, *mtcs) {
+            let arg_rdr = new_tt_reader(&cx.parse_sess().span_diagnostic,
+                                        None,
+                                        arg.iter()
+                                           .map(|x| (*x).clone())
+                                           .collect());
+            match parse(cx.parse_sess(), cx.cfg(), arg_rdr, mtcs.as_slice()) {
               Success(named_matches) => {
                 let rhs = match *rhses[i] {
                     // okay, what's your transcriber?
@@ -137,7 +147,10 @@ fn generic_extension(cx: &ExtCtxt,
                         match *tt {
                             // cut off delimiters; don't parse 'em
                             TTDelim(ref tts) => {
-                                (*tts).slice(1u,(*tts).len()-1u).to_owned()
+                                (*tts).slice(1u,(*tts).len()-1u)
+                                      .iter()
+                                      .map(|x| (*x).clone())
+                                      .collect()
                             }
                             _ => cx.span_fatal(
                                 sp, "macro rhs must be delimited")
@@ -146,7 +159,8 @@ fn generic_extension(cx: &ExtCtxt,
                     _ => cx.span_bug(sp, "bad thing in rhs")
                 };
                 // rhs has holes ( `$id` and `$(...)` that need filled)
-                let trncbr = new_tt_reader(s_d, Some(named_matches),
+                let trncbr = new_tt_reader(&cx.parse_sess().span_diagnostic,
+                                           Some(named_matches),
                                            rhs);
                 let p = Parser(cx.parse_sess(), cx.cfg(), ~trncbr);
                 // Let the context choose how to interpret the result.
@@ -174,7 +188,7 @@ fn generic_extension(cx: &ExtCtxt,
 pub fn add_new_extension(cx: &mut ExtCtxt,
                          sp: Span,
                          name: Ident,
-                         arg: ~[ast::TokenTree])
+                         arg: Vec<ast::TokenTree> )
                          -> base::MacResult {
     // these spans won't matter, anyways
     fn ms(m: Matcher_) -> Matcher {
@@ -191,19 +205,18 @@ pub fn add_new_extension(cx: &mut ExtCtxt,
     // The grammar for macro_rules! is:
     // $( $lhs:mtcs => $rhs:tt );+
     // ...quasiquoting this would be nice.
-    let argument_gram = ~[
-        ms(MatchSeq(~[
+    let argument_gram = vec!(
+        ms(MatchSeq(vec!(
             ms(MatchNonterminal(lhs_nm, special_idents::matchers, 0u)),
             ms(MatchTok(FAT_ARROW)),
-            ms(MatchNonterminal(rhs_nm, special_idents::tt, 1u)),
-        ], Some(SEMI), false, 0u, 2u)),
+            ms(MatchNonterminal(rhs_nm, special_idents::tt, 1u))), Some(SEMI), false, 0u, 2u)),
         //to phase into semicolon-termination instead of
         //semicolon-separation
-        ms(MatchSeq(~[ms(MatchTok(SEMI))], None, true, 2u, 2u))];
+        ms(MatchSeq(vec!(ms(MatchTok(SEMI))), None, true, 2u, 2u)));
 
 
     // Parse the macro_rules! invocation (`none` is for no interpolations):
-    let arg_reader = new_tt_reader(cx.parse_sess().span_diagnostic,
+    let arg_reader = new_tt_reader(&cx.parse_sess().span_diagnostic,
                                    None,
                                    arg.clone());
     let argument_map = parse_or_else(cx.parse_sess(),

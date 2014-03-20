@@ -30,7 +30,7 @@ use rt::task::{Task, BlockedTask};
 use rt::thread::Thread;
 use sync::atomics;
 use unstable::mutex::NativeMutex;
-use vec::OwnedVector;
+use slice::OwnedVector;
 
 use mpsc = sync::mpsc_queue;
 
@@ -302,7 +302,7 @@ impl<T: Send> Packet<T> {
             }
         };
         match ret {
-            // See the discussion in the stream implementation for why we we
+            // See the discussion in the stream implementation for why we
             // might decrement steals.
             Some(data) => {
                 if self.steals > MAX_STEALS {

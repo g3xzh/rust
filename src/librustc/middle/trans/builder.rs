@@ -17,8 +17,9 @@ use middle::trans::base;
 use middle::trans::common::*;
 use middle::trans::machine::llalign_of_pref;
 use middle::trans::type_::Type;
-use std::libc::{c_uint, c_ulonglong, c_char};
+
 use collections::HashMap;
+use std::libc::{c_uint, c_ulonglong, c_char};
 use syntax::codemap::Span;
 
 pub struct Builder<'a> {
@@ -36,19 +37,19 @@ pub fn noname() -> *c_char {
 impl<'a> Builder<'a> {
     pub fn new(ccx: &'a CrateContext) -> Builder<'a> {
         Builder {
-            llbuilder: ccx.builder.B,
+            llbuilder: ccx.builder.b,
             ccx: ccx,
         }
     }
 
     pub fn count_insn(&self, category: &str) {
-        if self.ccx.sess.trans_stats() {
+        if self.ccx.sess().trans_stats() {
             self.ccx.stats.n_llvm_insns.set(self.ccx
                                                 .stats
                                                 .n_llvm_insns
                                                 .get() + 1);
         }
-        if self.ccx.sess.count_llvm_insns() {
+        if self.ccx.sess().count_llvm_insns() {
             base::with_insn_ctxt(|v| {
                 let mut h = self.ccx.stats.llvm_insns.borrow_mut();
 
@@ -362,37 +363,37 @@ impl<'a> Builder<'a> {
         }
     }
 
-    pub fn neg(&self, V: ValueRef) -> ValueRef {
+    pub fn neg(&self, v: ValueRef) -> ValueRef {
         self.count_insn("neg");
         unsafe {
-            llvm::LLVMBuildNeg(self.llbuilder, V, noname())
+            llvm::LLVMBuildNeg(self.llbuilder, v, noname())
         }
     }
 
-    pub fn nswneg(&self, V: ValueRef) -> ValueRef {
+    pub fn nswneg(&self, v: ValueRef) -> ValueRef {
         self.count_insn("nswneg");
         unsafe {
-            llvm::LLVMBuildNSWNeg(self.llbuilder, V, noname())
+            llvm::LLVMBuildNSWNeg(self.llbuilder, v, noname())
         }
     }
 
-    pub fn nuwneg(&self, V: ValueRef) -> ValueRef {
+    pub fn nuwneg(&self, v: ValueRef) -> ValueRef {
         self.count_insn("nuwneg");
         unsafe {
-            llvm::LLVMBuildNUWNeg(self.llbuilder, V, noname())
+            llvm::LLVMBuildNUWNeg(self.llbuilder, v, noname())
         }
     }
-    pub fn fneg(&self, V: ValueRef) -> ValueRef {
+    pub fn fneg(&self, v: ValueRef) -> ValueRef {
         self.count_insn("fneg");
         unsafe {
-            llvm::LLVMBuildFNeg(self.llbuilder, V, noname())
+            llvm::LLVMBuildFNeg(self.llbuilder, v, noname())
         }
     }
 
-    pub fn not(&self, V: ValueRef) -> ValueRef {
+    pub fn not(&self, v: ValueRef) -> ValueRef {
         self.count_insn("not");
         unsafe {
-            llvm::LLVMBuildNot(self.llbuilder, V, noname())
+            llvm::LLVMBuildNot(self.llbuilder, v, noname())
         }
     }
 
@@ -534,15 +535,15 @@ impl<'a> Builder<'a> {
         // Small vector optimization. This should catch 100% of the cases that
         // we care about.
         if ixs.len() < 16 {
-            let mut small_vec = [ C_i32(0), ..16 ];
+            let mut small_vec = [ C_i32(self.ccx, 0), ..16 ];
             for (small_vec_e, &ix) in small_vec.mut_iter().zip(ixs.iter()) {
-                *small_vec_e = C_i32(ix as i32);
+                *small_vec_e = C_i32(self.ccx, ix as i32);
             }
             self.inbounds_gep(base, small_vec.slice(0, ixs.len()))
         } else {
-            let v = ixs.iter().map(|i| C_i32(*i as i32)).collect::<~[ValueRef]>();
+            let v = ixs.iter().map(|i| C_i32(self.ccx, *i as i32)).collect::<Vec<ValueRef>>();
             self.count_insn("gepi");
-            self.inbounds_gep(base, v)
+            self.inbounds_gep(base, v.as_slice())
         }
     }
 
@@ -561,17 +562,17 @@ impl<'a> Builder<'a> {
         }
     }
 
-    pub fn global_string(&self, _Str: *c_char) -> ValueRef {
+    pub fn global_string(&self, _str: *c_char) -> ValueRef {
         self.count_insn("globalstring");
         unsafe {
-            llvm::LLVMBuildGlobalString(self.llbuilder, _Str, noname())
+            llvm::LLVMBuildGlobalString(self.llbuilder, _str, noname())
         }
     }
 
-    pub fn global_string_ptr(&self, _Str: *c_char) -> ValueRef {
+    pub fn global_string_ptr(&self, _str: *c_char) -> ValueRef {
         self.count_insn("globalstringptr");
         unsafe {
-            llvm::LLVMBuildGlobalStringPtr(self.llbuilder, _Str, noname())
+            llvm::LLVMBuildGlobalStringPtr(self.llbuilder, _str, noname())
         }
     }
 
@@ -746,21 +747,21 @@ impl<'a> Builder<'a> {
     }
 
     pub fn add_span_comment(&self, sp: Span, text: &str) {
-        if self.ccx.sess.asm_comments() {
-            let s = format!("{} ({})", text, self.ccx.sess.codemap.span_to_str(sp));
+        if self.ccx.sess().asm_comments() {
+            let s = format!("{} ({})", text, self.ccx.sess().codemap().span_to_str(sp));
             debug!("{}", s);
             self.add_comment(s);
         }
     }
 
     pub fn add_comment(&self, text: &str) {
-        if self.ccx.sess.asm_comments() {
+        if self.ccx.sess().asm_comments() {
             let sanitized = text.replace("$", "");
             let comment_text = format!("\\# {}", sanitized.replace("\n", "\n\t# "));
             self.count_insn("inlineasm");
             let asm = comment_text.with_c_str(|c| {
                 unsafe {
-                    llvm::LLVMConstInlineAsm(Type::func([], &Type::void()).to_ref(),
+                    llvm::LLVMConstInlineAsm(Type::func([], &Type::void(self.ccx)).to_ref(),
                                              c, noname(), False, False)
                 }
             });
@@ -857,9 +858,10 @@ impl<'a> Builder<'a> {
     pub fn vector_splat(&self, num_elts: uint, elt: ValueRef) -> ValueRef {
         unsafe {
             let elt_ty = val_ty(elt);
-            let Undef = llvm::LLVMGetUndef(Type::vector(&elt_ty, num_elts as u64).to_ref());
-            let vec = self.insert_element(Undef, elt, C_i32(0));
-            self.shuffle_vector(vec, Undef, C_null(Type::vector(&Type::i32(), num_elts as u64)))
+            let undef = llvm::LLVMGetUndef(Type::vector(&elt_ty, num_elts as u64).to_ref());
+            let vec = self.insert_element(undef, elt, C_i32(self.ccx, 0));
+            let vec_i32_ty = Type::vector(&Type::i32(self.ccx), num_elts as u64);
+            self.shuffle_vector(vec, undef, C_null(vec_i32_ty))
         }
     }
 
@@ -902,17 +904,17 @@ impl<'a> Builder<'a> {
 
     pub fn trap(&self) {
         unsafe {
-            let BB: BasicBlockRef = llvm::LLVMGetInsertBlock(self.llbuilder);
-            let FN: ValueRef = llvm::LLVMGetBasicBlockParent(BB);
-            let M: ModuleRef = llvm::LLVMGetGlobalParent(FN);
-            let T: ValueRef = "llvm.trap".with_c_str(|buf| {
-                llvm::LLVMGetNamedFunction(M, buf)
+            let bb: BasicBlockRef = llvm::LLVMGetInsertBlock(self.llbuilder);
+            let fn_: ValueRef = llvm::LLVMGetBasicBlockParent(bb);
+            let m: ModuleRef = llvm::LLVMGetGlobalParent(fn_);
+            let t: ValueRef = "llvm.trap".with_c_str(|buf| {
+                llvm::LLVMGetNamedFunction(m, buf)
             });
-            assert!((T as int != 0));
+            assert!((t as int != 0));
             let args: &[ValueRef] = [];
             self.count_insn("trap");
             llvm::LLVMBuildCall(
-                self.llbuilder, T, args.as_ptr(), args.len() as c_uint, noname());
+                self.llbuilder, t, args.as_ptr(), args.len() as c_uint, noname());
         }
     }
 

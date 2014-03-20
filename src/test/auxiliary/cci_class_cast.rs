@@ -9,19 +9,23 @@
 // except according to those terms.
 
 pub mod kitty {
+    use std::fmt;
+
     pub struct cat {
       priv meows : uint,
       how_hungry : int,
       name : ~str,
     }
 
-    impl ToStr for cat {
-       fn to_str(&self) -> ~str { self.name.clone() }
+    impl fmt::Show for cat {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            write!(f.buf, "{}", self.name)
+        }
     }
 
     impl cat {
         fn meow(&mut self) {
-            error!("Meow");
+            println!("Meow");
             self.meows += 1u;
             if self.meows % 5u == 0u {
                 self.how_hungry += 1;
@@ -35,12 +39,12 @@ pub mod kitty {
 
         pub fn eat(&mut self) -> bool {
             if self.how_hungry > 0 {
-                error!("OM NOM NOM");
+                println!("OM NOM NOM");
                 self.how_hungry -= 2;
                 return true;
             }
             else {
-                error!("Not hungry!");
+                println!("Not hungry!");
                 return false;
             }
         }

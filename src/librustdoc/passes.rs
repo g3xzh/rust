@@ -13,6 +13,7 @@ use collections::HashSet;
 use std::local_data;
 use std::uint;
 use syntax::ast;
+use rustc::util::nodemap::NodeSet;
 
 use clean;
 use clean::Item;
@@ -33,7 +34,7 @@ pub fn strip_hidden(krate: clean::Crate) -> plugins::PluginResult {
             fn fold_item(&mut self, i: Item) -> Option<Item> {
                 for attr in i.attrs.iter() {
                     match attr {
-                        &clean::List(~"doc", ref l) => {
+                        &clean::List(ref x, ref l) if "doc" == *x => {
                             for innerattr in l.iter() {
                                 match innerattr {
                                     &clean::Word(ref s) if "hidden" == *s => {
@@ -110,7 +111,7 @@ pub fn strip_private(krate: clean::Crate) -> plugins::PluginResult {
 
 struct Stripper<'a> {
     retained: &'a mut HashSet<ast::NodeId>,
-    exported_items: &'a HashSet<ast::NodeId>,
+    exported_items: &'a NodeSet,
 }
 
 impl<'a> fold::DocFolder for Stripper<'a> {
@@ -127,7 +128,8 @@ impl<'a> fold::DocFolder for Stripper<'a> {
                 }
             }
 
-            clean::ViewItemItem(..) => {
+            clean::ViewItemItem(..) |
+            clean::ModuleItem(..) => {
                 if i.visibility != Some(ast::Public) {
                     return None
                 }
@@ -138,9 +140,6 @@ impl<'a> fold::DocFolder for Stripper<'a> {
                     return None;
                 }
             }
-
-            // handled below
-            clean::ModuleItem(..) => {}
 
             // trait impls for private items should be stripped
             clean::ImplItem(clean::Impl{ for_: clean::ResolvedPath{ id: ref for_id, .. }, .. }) => {
@@ -222,7 +221,7 @@ pub fn unindent_comments(krate: clean::Crate) -> plugins::PluginResult {
             let mut avec: ~[clean::Attribute] = ~[];
             for attr in i.attrs.iter() {
                 match attr {
-                    &clean::NameValue(~"doc", ref s) => avec.push(
+                    &clean::NameValue(ref x, ref s) if "doc" == *x => avec.push(
                         clean::NameValue(~"doc", unindent(*s))),
                     x => avec.push(x.clone())
                 }
@@ -244,7 +243,7 @@ pub fn collapse_docs(krate: clean::Crate) -> plugins::PluginResult {
             let mut i = i;
             for attr in i.attrs.iter() {
                 match *attr {
-                    clean::NameValue(~"doc", ref s) => {
+                    clean::NameValue(ref x, ref s) if "doc" == *x => {
                         docstr.push_str(s.clone());
                         docstr.push_char('\n');
                     },
@@ -252,7 +251,7 @@ pub fn collapse_docs(krate: clean::Crate) -> plugins::PluginResult {
                 }
             }
             let mut a: ~[clean::Attribute] = i.attrs.iter().filter(|&a| match a {
-                &clean::NameValue(~"doc", _) => false,
+                &clean::NameValue(ref x, _) if "doc" == *x => false,
                 _ => true
             }).map(|x| x.clone()).collect();
             if "" != docstr {

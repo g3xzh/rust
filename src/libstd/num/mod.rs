@@ -15,7 +15,7 @@
 
 #[allow(missing_doc)];
 
-use clone::{Clone, DeepClone};
+use clone::Clone;
 use cmp::{Eq, Ord};
 use kinds::Pod;
 use mem::size_of;
@@ -247,7 +247,6 @@ pub trait Bitwise: Bounded
 /// may be useful for systems programming.
 pub trait Primitive: Pod
                    + Clone
-                   + DeepClone
                    + Num
                    + NumCast
                    + Ord
@@ -295,7 +294,7 @@ pub fn checked_next_power_of_two<T: Unsigned + Int>(n: T) -> Option<T> {
 }
 
 /// Used for representing the classification of floating point numbers
-#[deriving(Eq)]
+#[deriving(Eq, Show)]
 pub enum FPCategory {
     /// "Not a Number", often obtained by dividing by zero
     FPNaN,
@@ -313,6 +312,9 @@ pub enum FPCategory {
 pub trait Float: Signed
                + Round
                + Primitive {
+    fn max(self, other: Self) -> Self;
+    fn min(self, other: Self) -> Self;
+
     // FIXME (#5527): These should be associated constants
     fn nan() -> Self;
     fn infinity() -> Self;
@@ -1075,7 +1077,7 @@ pub trait CheckedDiv: Div<Self, Self> {
 
 /// Helper function for testing numeric operations
 #[cfg(test)]
-pub fn test_num<T:Num + NumCast>(ten: T, two: T) {
+pub fn test_num<T:Num + NumCast + Show>(ten: T, two: T) {
     assert_eq!(ten.add(&two),  cast(12).unwrap());
     assert_eq!(ten.sub(&two),  cast(8).unwrap());
     assert_eq!(ten.mul(&two),  cast(20).unwrap());
@@ -1650,7 +1652,7 @@ mod tests {
     test_checked_next_power_of_two!(test_checked_next_power_of_two_u64, u64)
     test_checked_next_power_of_two!(test_checked_next_power_of_two_uint, uint)
 
-    #[deriving(Eq)]
+    #[deriving(Eq, Show)]
     struct Value { x: int }
 
     impl ToPrimitive for Value {
@@ -1725,12 +1727,12 @@ mod bench {
     extern crate test;
     use self::test::BenchHarness;
     use num;
-    use vec;
+    use slice;
     use prelude::*;
 
     #[bench]
     fn bench_pow_function(b: &mut BenchHarness) {
-        let v = vec::from_fn(1024, |n| n);
+        let v = slice::from_fn(1024, |n| n);
         b.iter(|| {v.iter().fold(0, |old, new| num::pow(old, *new));});
     }
 }

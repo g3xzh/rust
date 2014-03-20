@@ -46,6 +46,22 @@ pub trait Pod {
     // Empty.
 }
 
+/// Types that can be safely shared between threads, hence thread-safe.
+#[cfg(stage0)]
+pub trait Share {
+    // Empty
+}
+
+#[cfg(stage0)]
+impl<T> Share for T {}
+
+/// Types that can be safely shared between threads, hence thread-safe.
+#[cfg(not(stage0))]
+#[lang="share"]
+pub trait Share {
+    // Empty
+}
+
 /// Marker types are special types that are used with unsafe code to
 /// inform the compiler of special constraints. Marker types should
 /// only be needed when you are creating an abstraction that is
@@ -84,10 +100,10 @@ pub mod marker {
     /// The type system would currently infer that the value of
     /// the type parameter `T` is irrelevant, and hence a `S<int>` is
     /// a subtype of `S<~[int]>` (or, for that matter, `S<U>` for
-    /// for any `U`). But this is incorrect because `get()` converts the
+    /// any `U`). But this is incorrect because `get()` converts the
     /// `*()` into a `*T` and reads from it. Therefore, we should include the
     /// a marker field `CovariantType<T>` to inform the type checker that
-    /// `S<T>` is a subtype of `S<U>` if `T` is a a subtype of `U`
+    /// `S<T>` is a subtype of `S<U>` if `T` is a subtype of `U`
     /// (for example, `S<&'static int>` is a subtype of `S<&'a int>`
     /// for some lifetime `'a`, but not the other way around).
     #[lang="covariant_type"]
@@ -125,7 +141,7 @@ pub mod marker {
     /// The type system would currently infer that the value of
     /// the type parameter `T` is irrelevant, and hence a `S<int>` is
     /// a subtype of `S<~[int]>` (or, for that matter, `S<U>` for
-    /// for any `U`). But this is incorrect because `get()` converts the
+    /// any `U`). But this is incorrect because `get()` converts the
     /// `*()` into a `fn(T)` and then passes a value of type `T` to it.
     ///
     /// Supplying a `ContravariantType` marker would correct the
@@ -231,6 +247,13 @@ pub mod marker {
     #[lang="no_pod_bound"]
     #[deriving(Eq,Clone)]
     pub struct NoPod;
+
+    /// A type which is considered "not sharable", meaning that
+    /// its contents are not threadsafe, hence they cannot be
+    /// shared between tasks.
+    #[lang="no_share_bound"]
+    #[deriving(Eq,Clone)]
+    pub struct NoShare;
 
     /// A type which is considered managed by the GC. This is typically
     /// embedded in other types.

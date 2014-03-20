@@ -14,9 +14,9 @@
 Core encoding and decoding interfaces.
 */
 
+use std::path;
 use std::rc::Rc;
-use std::vec;
-use std::vec_ng::Vec;
+use std::slice;
 
 pub trait Encoder {
     // Primitive types:
@@ -387,7 +387,7 @@ impl<S:Encoder,T:Encodable<S>> Encodable<S> for @T {
 impl<S:Encoder,T:Encodable<S>> Encodable<S> for Rc<T> {
     #[inline]
     fn encode(&self, s: &mut S) {
-        self.borrow().encode(s)
+        self.deref().encode(s)
     }
 }
 
@@ -427,7 +427,7 @@ impl<S:Encoder,T:Encodable<S>> Encodable<S> for ~[T] {
 impl<D:Decoder,T:Decodable<D>> Decodable<D> for ~[T] {
     fn decode(d: &mut D) -> ~[T] {
         d.read_seq(|d, len| {
-            vec::from_fn(len, |i| {
+            slice::from_fn(len, |i| {
                 d.read_seq_elt(i, |d| Decodable::decode(d))
             })
         })
@@ -625,6 +625,32 @@ impl<
     }
 }
 
+impl<E: Encoder> Encodable<E> for path::posix::Path {
+    fn encode(&self, e: &mut E) {
+        self.as_vec().encode(e)
+    }
+}
+
+impl<D: Decoder> Decodable<D> for path::posix::Path {
+    fn decode(d: &mut D) -> path::posix::Path {
+        let bytes: ~[u8] = Decodable::decode(d);
+        path::posix::Path::new(bytes)
+    }
+}
+
+impl<E: Encoder> Encodable<E> for path::windows::Path {
+    fn encode(&self, e: &mut E) {
+        self.as_vec().encode(e)
+    }
+}
+
+impl<D: Decoder> Decodable<D> for path::windows::Path {
+    fn decode(d: &mut D) -> path::windows::Path {
+        let bytes: ~[u8] = Decodable::decode(d);
+        path::windows::Path::new(bytes)
+    }
+}
+
 // ___________________________________________________________________________
 // Helper routines
 //
@@ -653,7 +679,7 @@ pub trait DecoderHelpers {
 impl<D:Decoder> DecoderHelpers for D {
     fn read_to_vec<T>(&mut self, f: |&mut D| -> T) -> ~[T] {
         self.read_seq(|this, len| {
-            vec::from_fn(len, |i| {
+            slice::from_fn(len, |i| {
                 this.read_seq_elt(i, |this| f(this))
             })
         })

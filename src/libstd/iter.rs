@@ -68,7 +68,7 @@ use cmp;
 use num::{Zero, One, CheckedAdd, CheckedSub, Saturating, ToPrimitive, Int};
 use option::{Option, Some, None};
 use ops::{Add, Mul, Sub};
-use cmp::{Eq, Ord};
+use cmp::{Eq, Ord, TotalOrd};
 use clone::Clone;
 use uint;
 use mem;
@@ -398,9 +398,9 @@ pub trait Iterator<A> {
     /// let xs = [1u, 4, 2, 3, 8, 9, 6];
     /// let sum = xs.iter()
     ///             .map(|&x| x)
-    ///             .inspect(|&x| debug!("filtering {}", x))
+    ///             .inspect(|&x| println!("filtering {}", x))
     ///             .filter(|&x| x % 2 == 0)
-    ///             .inspect(|&x| debug!("{} made it through", x))
+    ///             .inspect(|&x| println!("{} made it through", x))
     ///             .sum();
     /// println!("{}", sum);
     /// ```
@@ -626,7 +626,7 @@ pub trait Iterator<A> {
     /// assert_eq!(*xs.iter().max_by(|x| x.abs()).unwrap(), -10);
     /// ```
     #[inline]
-    fn max_by<B: Ord>(&mut self, f: |&A| -> B) -> Option<A> {
+    fn max_by<B: TotalOrd>(&mut self, f: |&A| -> B) -> Option<A> {
         self.fold(None, |max: Option<(A, B)>, x| {
             let x_val = f(&x);
             match max {
@@ -650,7 +650,7 @@ pub trait Iterator<A> {
     /// assert_eq!(*xs.iter().min_by(|x| x.abs()).unwrap(), 0);
     /// ```
     #[inline]
-    fn min_by<B: Ord>(&mut self, f: |&A| -> B) -> Option<A> {
+    fn min_by<B: TotalOrd>(&mut self, f: |&A| -> B) -> Option<A> {
         self.fold(None, |min: Option<(A, B)>, x| {
             let x_val = f(&x);
             match min {
@@ -917,7 +917,7 @@ pub trait OrdIterator<A> {
     fn min_max(&mut self) -> MinMaxResult<A>;
 }
 
-impl<A: Ord, T: Iterator<A>> OrdIterator<A> for T {
+impl<A: TotalOrd, T: Iterator<A>> OrdIterator<A> for T {
     #[inline]
     fn max(&mut self) -> Option<A> {
         self.fold(None, |max, x| {
@@ -983,7 +983,7 @@ impl<A: Ord, T: Iterator<A>> OrdIterator<A> for T {
 }
 
 /// `MinMaxResult` is an enum returned by `min_max`. See `OrdIterator::min_max` for more detail.
-#[deriving(Clone, Eq)]
+#[deriving(Clone, Eq, Show)]
 pub enum MinMaxResult<T> {
     /// Empty iterator
     NoElements,
@@ -1757,7 +1757,7 @@ impl<'a,
 
 /// An iterator that yields `None` forever after the underlying iterator
 /// yields `None` once.
-#[deriving(Clone, DeepClone)]
+#[deriving(Clone)]
 pub struct Fuse<T> {
     priv iter: T,
     priv done: bool
@@ -1946,7 +1946,7 @@ impl<A: Add<A, A> + Clone> Iterator<A> for Counter<A> {
 }
 
 /// An iterator over the range [start, stop)
-#[deriving(Clone, DeepClone)]
+#[deriving(Clone)]
 pub struct Range<A> {
     priv state: A,
     priv stop: A,
@@ -2020,7 +2020,7 @@ impl<A: Int + Ord + Clone + ToPrimitive> DoubleEndedIterator<A> for Range<A> {
 }
 
 /// An iterator over the range [start, stop]
-#[deriving(Clone, DeepClone)]
+#[deriving(Clone)]
 pub struct RangeInclusive<A> {
     priv range: Range<A>,
     priv done: bool
@@ -2033,7 +2033,7 @@ pub fn range_inclusive<A: Add<A, A> + Ord + Clone + One + ToPrimitive>(start: A,
     RangeInclusive{range: range(start, stop), done: false}
 }
 
-impl<A: Add<A, A> + Eq + Ord + Clone + ToPrimitive> Iterator<A> for RangeInclusive<A> {
+impl<A: Add<A, A> + Ord + Clone + ToPrimitive> Iterator<A> for RangeInclusive<A> {
     #[inline]
     fn next(&mut self) -> Option<A> {
         match self.range.next() {
@@ -2083,7 +2083,7 @@ impl<A: Sub<A, A> + Int + Ord + Clone + ToPrimitive> DoubleEndedIterator<A>
 }
 
 /// An iterator over the range [start, stop) by `step`. It handles overflow by stopping.
-#[deriving(Clone, DeepClone)]
+#[deriving(Clone)]
 pub struct RangeStep<A> {
     priv state: A,
     priv stop: A,
@@ -2115,7 +2115,7 @@ impl<A: CheckedAdd + Ord + Clone> Iterator<A> for RangeStep<A> {
 }
 
 /// An iterator over the range [start, stop] by `step`. It handles overflow by stopping.
-#[deriving(Clone, DeepClone)]
+#[deriving(Clone)]
 pub struct RangeStepInclusive<A> {
     priv state: A,
     priv stop: A,
@@ -2150,7 +2150,7 @@ impl<A: CheckedAdd + Ord + Clone + Eq> Iterator<A> for RangeStepInclusive<A> {
 }
 
 /// An iterator that repeats an element endlessly
-#[deriving(Clone, DeepClone)]
+#[deriving(Clone)]
 pub struct Repeat<A> {
     priv element: A
 }
@@ -2244,7 +2244,7 @@ pub mod order {
     }
 
     /// Return `a` < `b` lexicographically (Using partial order, `Ord`)
-    pub fn lt<A: Eq + Ord, T: Iterator<A>>(mut a: T, mut b: T) -> bool {
+    pub fn lt<A: Ord, T: Iterator<A>>(mut a: T, mut b: T) -> bool {
         loop {
             match (a.next(), b.next()) {
                 (None, None) => return false,
@@ -2256,7 +2256,7 @@ pub mod order {
     }
 
     /// Return `a` <= `b` lexicographically (Using partial order, `Ord`)
-    pub fn le<A: Eq + Ord, T: Iterator<A>>(mut a: T, mut b: T) -> bool {
+    pub fn le<A: Ord, T: Iterator<A>>(mut a: T, mut b: T) -> bool {
         loop {
             match (a.next(), b.next()) {
                 (None, None) => return true,
@@ -2268,7 +2268,7 @@ pub mod order {
     }
 
     /// Return `a` > `b` lexicographically (Using partial order, `Ord`)
-    pub fn gt<A: Eq + Ord, T: Iterator<A>>(mut a: T, mut b: T) -> bool {
+    pub fn gt<A: Ord, T: Iterator<A>>(mut a: T, mut b: T) -> bool {
         loop {
             match (a.next(), b.next()) {
                 (None, None) => return false,
@@ -2280,7 +2280,7 @@ pub mod order {
     }
 
     /// Return `a` >= `b` lexicographically (Using partial order, `Ord`)
-    pub fn ge<A: Eq + Ord, T: Iterator<A>>(mut a: T, mut b: T) -> bool {
+    pub fn ge<A: Ord, T: Iterator<A>>(mut a: T, mut b: T) -> bool {
         loop {
             match (a.next(), b.next()) {
                 (None, None) => return true,
@@ -2293,7 +2293,7 @@ pub mod order {
 
     #[test]
     fn test_lt() {
-        use vec::ImmutableVector;
+        use slice::ImmutableVector;
 
         let empty: [int, ..0] = [];
         let xs = [1,2,3];
@@ -2507,7 +2507,7 @@ mod tests {
                    .collect::<~[uint]>();
 
         assert_eq!(n, xs.len());
-        assert_eq!(xs, ys.as_slice());
+        assert_eq!(xs.as_slice(), ys.as_slice());
     }
 
     #[test]
@@ -2824,11 +2824,11 @@ mod tests {
         assert_eq!(len, b.indexable());
         let mut n = 0;
         for (i, elt) in a.enumerate() {
-            assert_eq!(Some(elt), b.idx(i));
+            assert!(Some(elt) == b.idx(i));
             n += 1;
         }
         assert_eq!(n, len);
-        assert_eq!(None, b.idx(n));
+        assert!(None == b.idx(n));
         // call recursively to check after picking off an element
         if len > 0 {
             b.next();
@@ -2978,6 +2978,12 @@ mod tests {
             }
         }
 
+        impl Eq for Foo {
+            fn eq(&self, _: &Foo) -> bool {
+                true
+            }
+        }
+
         impl Ord for Foo {
             fn lt(&self, _: &Foo) -> bool {
                 false
@@ -3051,7 +3057,7 @@ mod tests {
     fn test_reverse() {
         let mut ys = [1, 2, 3, 4, 5];
         ys.mut_iter().reverse_();
-        assert_eq!(ys, [5, 4, 3, 2, 1]);
+        assert!(ys == [5, 4, 3, 2, 1]);
     }
 
     #[test]

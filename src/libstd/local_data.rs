@@ -42,7 +42,7 @@ local_data::get(key_vector, |opt| assert_eq!(*opt.unwrap(), ~[4]));
 
 use cast;
 use option::{None, Option, Some};
-use vec::{ImmutableVector, MutableVector, OwnedVector};
+use slice::{ImmutableVector, MutableVector, OwnedVector};
 use iter::{Iterator};
 use rt::task::{Task, LocalStorage};
 use mem::replace;
@@ -398,8 +398,8 @@ mod tests {
             }
         });
         modify(my_key, |data| {
-            match data {
-                Some(~"first data") => Some(~"next data"),
+            match data.as_ref().map(|s| s.as_slice()) {
+                Some("first data") => Some(~"next data"),
                 Some(ref val)       => fail!("wrong value: {}", *val),
                 None                 => fail!("missing value")
             }

@@ -20,10 +20,10 @@ generally useful to many Rust programs.
 */
 
 // Reexported core operators
-pub use kinds::{Freeze, Pod, Send, Sized};
+pub use kinds::{Freeze, Pod, Send, Sized, Share};
 pub use ops::{Add, Sub, Mul, Div, Rem, Neg, Not};
 pub use ops::{BitAnd, BitOr, BitXor};
-pub use ops::{Drop};
+pub use ops::{Drop, Deref, DerefMut};
 pub use ops::{Shl, Shr, Index};
 pub use option::{Option, Some, None};
 pub use result::{Result, Ok, Err};
@@ -35,38 +35,34 @@ pub use mem::drop;
 
 // Reexported types and traits
 
-pub use any::{Any, AnyOwnExt, AnyRefExt, AnyMutRefExt};
 pub use ascii::{Ascii, AsciiCast, OwnedAsciiCast, AsciiStr, IntoBytes};
-pub use bool::Bool;
 pub use c_str::ToCStr;
 pub use char::Char;
-pub use clone::{Clone, DeepClone};
+pub use clone::Clone;
 pub use cmp::{Eq, Ord, TotalEq, TotalOrd, Ordering, Less, Equal, Greater, Equiv};
 pub use container::{Container, Mutable, Map, MutableMap, Set, MutableSet};
-pub use default::Default;
-pub use from_str::FromStr;
 pub use iter::{FromIterator, Extendable};
 pub use iter::{Iterator, DoubleEndedIterator, RandomAccessIterator, CloneableIterator};
 pub use iter::{OrdIterator, MutableDoubleEndedIterator, ExactSize};
 pub use num::{Num, NumCast, CheckedAdd, CheckedSub, CheckedMul};
 pub use num::{Signed, Unsigned, Round};
-pub use num::{Primitive, Int, Float, ToStrRadix, ToPrimitive, FromPrimitive};
+pub use num::{Primitive, Int, Float, ToPrimitive, FromPrimitive};
 pub use path::{GenericPath, Path, PosixPath, WindowsPath};
 pub use ptr::RawPtr;
 pub use io::{Buffer, Writer, Reader, Seek};
 pub use str::{Str, StrVector, StrSlice, OwnedStr, IntoMaybeOwned};
-pub use to_bytes::IterBytes;
 pub use to_str::{ToStr, IntoStr};
 pub use tuple::{Tuple1, Tuple2, Tuple3, Tuple4};
 pub use tuple::{Tuple5, Tuple6, Tuple7, Tuple8};
 pub use tuple::{Tuple9, Tuple10, Tuple11, Tuple12};
-pub use vec::{ImmutableEqVector, ImmutableTotalOrdVector, ImmutableCloneableVector};
-pub use vec::{OwnedVector, OwnedCloneableVector, OwnedEqVector};
-pub use vec::{MutableVector, MutableTotalOrdVector};
-pub use vec::{Vector, VectorVector, CloneableVector, ImmutableVector};
+pub use slice::{ImmutableEqVector, ImmutableTotalOrdVector, ImmutableCloneableVector};
+pub use slice::{OwnedVector, OwnedCloneableVector, OwnedEqVector};
+pub use slice::{MutableVector, MutableTotalOrdVector};
+pub use slice::{Vector, VectorVector, CloneableVector, ImmutableVector};
+pub use vec::Vec;
 
 // Reexported runtime types
-pub use comm::{Port, Chan};
+pub use comm::{channel, Sender, Receiver};
 pub use task::spawn;
 
 // Reexported statics

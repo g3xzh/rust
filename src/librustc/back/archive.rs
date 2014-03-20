@@ -16,20 +16,19 @@ use metadata::filesearch;
 use lib::llvm::{ArchiveRef, llvm};
 
 use std::cast;
-use std::io::fs;
 use std::io;
+use std::io::{fs, TempDir};
 use std::libc;
 use std::os;
-use std::run::{ProcessOptions, Process, ProcessOutput};
+use std::io::process::{ProcessConfig, Process, ProcessOutput};
 use std::str;
 use std::raw;
-use extra::tempfile::TempDir;
 use syntax::abi;
 
 pub static METADATA_FILENAME: &'static str = "rust.metadata.bin";
 
-pub struct Archive {
-    priv sess: Session,
+pub struct Archive<'a> {
+    priv sess: &'a Session,
     priv dst: Path,
 }
 
@@ -37,23 +36,26 @@ pub struct ArchiveRO {
     priv ptr: ArchiveRef,
 }
 
-fn run_ar(sess: Session, args: &str, cwd: Option<&Path>,
-        paths: &[&Path]) -> ProcessOutput {
+fn run_ar(sess: &Session, args: &str, cwd: Option<&Path>,
+          paths: &[&Path]) -> ProcessOutput {
     let ar = get_ar_prog(sess);
 
-    let mut args = ~[args.to_owned()];
+    let mut args = vec!(args.to_owned());
     let mut paths = paths.iter().map(|p| p.as_str().unwrap().to_owned());
     args.extend(&mut paths);
-    let mut opts = ProcessOptions::new();
-    opts.dir = cwd;
     debug!("{} {}", ar, args.connect(" "));
     match cwd {
         Some(p) => { debug!("inside {}", p.display()); }
         None => {}
     }
-    match Process::new(ar, args.as_slice(), opts) {
+    match Process::configure(ProcessConfig {
+        program: ar.as_slice(),
+        args: args.as_slice(),
+        cwd: cwd.map(|a| &*a),
+        .. ProcessConfig::new()
+    }) {
         Ok(mut prog) => {
-            let o = prog.finish_with_output();
+            let o = prog.wait_with_output();
             if !o.status.success() {
                 sess.err(format!("{} {} failed with: {}", ar, args.connect(" "),
                                  o.status));
@@ -71,22 +73,22 @@ fn run_ar(sess: Session, args: &str, cwd: Option<&Path>,
     }
 }
 
-impl Archive {
+impl<'a> Archive<'a> {
     /// Initializes a new static archive with the given object file
-    pub fn create<'a>(sess: Session, dst: &'a Path,
-                      initial_object: &'a Path) -> Archive {
+    pub fn create<'b>(sess: &'a Session, dst: &'b Path,
+                      initial_object: &'b Path) -> Archive<'a> {
         run_ar(sess, "crus", None, [dst, initial_object]);
         Archive { sess: sess, dst: dst.clone() }
     }
 
     /// Opens an existing static archive
-    pub fn open(sess: Session, dst: Path) -> Archive {
+    pub fn open(sess: &'a Session, dst: Path) -> Archive<'a> {
         assert!(dst.exists());
         Archive { sess: sess, dst: dst }
     }
 
     /// Read a file in the archive
-    pub fn read(&self, file: &str) -> ~[u8] {
+    pub fn read(&self, file: &str) -> Vec<u8> {
         // Apparently if "ar p" is used on windows, it generates a corrupt file
         // which has bad headers and LLVM will immediately choke on it
         if cfg!(windows) && cfg!(windows) { // FIXME(#10734) double-and
@@ -94,9 +96,17 @@ impl Archive {
             let archive = os::make_absolute(&self.dst);
             run_ar(self.sess, "x", Some(loc.path()), [&archive,
                                                       &Path::new(file)]);
-            fs::File::open(&loc.path().join(file)).read_to_end().unwrap()
+            let result: Vec<u8> =
+                fs::File::open(&loc.path().join(file)).read_to_end()
+                                                      .unwrap()
+                                                      .move_iter()
+                                                      .collect();
+            result
         } else {
-            run_ar(self.sess, "p", None, [&self.dst, &Path::new(file)]).output
+            run_ar(self.sess,
+                   "p",
+                   None,
+                   [&self.dst, &Path::new(file)]).output.move_iter().collect()
         }
     }
 
@@ -116,11 +126,11 @@ impl Archive {
                     lto: bool) -> io::IoResult<()> {
         let object = format!("{}.o", name);
         let bytecode = format!("{}.bc", name);
-        let mut ignore = ~[METADATA_FILENAME, bytecode.as_slice()];
+        let mut ignore = vec!(METADATA_FILENAME, bytecode.as_slice());
         if lto {
             ignore.push(object.as_slice());
         }
-        self.add_archive(rlib, name, ignore)
+        self.add_archive(rlib, name, ignore.as_slice())
     }
 
     /// Adds an arbitrary file to this archive
@@ -140,9 +150,12 @@ impl Archive {
     }
 
     /// Lists all files in an archive
-    pub fn files(&self) -> ~[~str] {
+    pub fn files(&self) -> Vec<~str> {
         let output = run_ar(self.sess, "t", None, [&self.dst]);
-        str::from_utf8(output.output).unwrap().lines().map(|s| s.to_owned()).collect()
+        let output = str::from_utf8(output.output).unwrap();
+        // use lines_any because windows delimits output with `\r\n` instead of
+        // just `\n`
+        output.lines_any().map(|s| s.to_owned()).collect()
     }
 
     fn add_archive(&mut self, archive: &Path, name: &str,
@@ -162,7 +175,7 @@ impl Archive {
         // all SYMDEF files as these are just magical placeholders which get
         // re-created when we make a new archive anyway.
         let files = try!(fs::readdir(loc.path()));
-        let mut inputs = ~[];
+        let mut inputs = Vec::new();
         for file in files.iter() {
             let filename = file.filename_str().unwrap();
             if skip.iter().any(|s| *s == filename) { continue }
@@ -176,7 +189,7 @@ impl Archive {
         if inputs.len() == 0 { return Ok(()) }
 
         // Finally, add all the renamed files to this archive
-        let mut args = ~[&self.dst];
+        let mut args = vec!(&self.dst);
         args.extend(&mut inputs.iter());
         run_ar(self.sess, "r", None, args.as_slice());
         Ok(())
@@ -192,7 +205,7 @@ impl Archive {
         let unixlibname = format!("lib{}.a", name);
 
         let mut rustpath = filesearch::rust_path();
-        rustpath.push(self.sess.filesearch.get_target_lib_path());
+        rustpath.push(self.sess.filesearch().get_target_lib_path());
         let addl_lib_search_paths = self.sess
                                         .opts
                                         .addl_lib_search_paths

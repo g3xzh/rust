@@ -16,12 +16,12 @@
 // However the extra library is designed to be optional (for code that must run on constrained
 //  environments like embedded devices or special environments like kernel code) so it must
 // be explicitly linked in.
-extern crate extra;
 
 // Extern mod controls linkage. Use controls the visibility of names to modules that are
 // already linked in. Using WriterUtil allows us to use the write_line method.
 use std::str;
-use std::vec;
+use std::slice;
+use std::fmt;
 
 // Represents a position on a canvas.
 struct Point {
@@ -62,8 +62,8 @@ impl Drop for AsciiArt {
 fn AsciiArt(width: uint, height: uint, fill: char) -> AsciiArt {
     // Use an anonymous function to build a vector of vectors containing
     // blank characters for each position in our canvas.
-    let lines = vec::build(Some(height), |push| {
-        for _ in range(0, height) { push(vec::from_elem(width, '.')); }
+    let lines = slice::build(Some(height), |push| {
+        for _ in range(0, height) { push(slice::from_elem(width, '.')); }
     });
 
     // Rust code often returns values by omitting the trailing semi-colon
@@ -94,13 +94,13 @@ impl AsciiArt {
 
 // Allows AsciiArt to be converted to a string using the libcore ToStr trait.
 // Note that the %s fmt! specifier will not call this automatically.
-impl ToStr for AsciiArt {
-    fn to_str(&self) -> ~str {
+impl fmt::Show for AsciiArt {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         // Convert each line into a string.
         let lines = self.lines.map(|line| str::from_chars(*line));
 
         // Concatenate the lines together using a new-line.
-        lines.connect("\n")
+        write!(f.buf, "{}", lines.connect("\n"))
     }
 }
 

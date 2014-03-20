@@ -146,7 +146,7 @@ pub fn mk_name_value_item(name: InternedString, value: ast::Lit)
     @dummy_spanned(MetaNameValue(name, value))
 }
 
-pub fn mk_list_item(name: InternedString, items: ~[@MetaItem]) -> @MetaItem {
+pub fn mk_list_item(name: InternedString, items: Vec<@MetaItem> ) -> @MetaItem {
     @dummy_spanned(MetaList(name, items))
 }
 
@@ -212,12 +212,12 @@ pub fn last_meta_item_value_str_by_name(items: &[@MetaItem], name: &str)
 
 /* Higher-level applications */
 
-pub fn sort_meta_items(items: &[@MetaItem]) -> ~[@MetaItem] {
+pub fn sort_meta_items(items: &[@MetaItem]) -> Vec<@MetaItem> {
     // This is sort of stupid here, but we need to sort by
     // human-readable strings.
     let mut v = items.iter()
         .map(|&mi| (mi.name(), mi))
-        .collect::<~[(InternedString, @MetaItem)]>();
+        .collect::<Vec<(InternedString, @MetaItem)> >();
 
     v.sort_by(|&(ref a, _), &(ref b, _)| a.cmp(b));
 
@@ -226,7 +226,8 @@ pub fn sort_meta_items(items: &[@MetaItem]) -> ~[@MetaItem] {
         match m.node {
             MetaList(ref n, ref mis) => {
                 @Spanned {
-                    node: MetaList((*n).clone(), sort_meta_items(*mis)),
+                    node: MetaList((*n).clone(),
+                                   sort_meta_items(mis.as_slice())),
                     .. /*bad*/ (*m).clone()
                 }
             }
@@ -239,11 +240,11 @@ pub fn sort_meta_items(items: &[@MetaItem]) -> ~[@MetaItem] {
  * From a list of crate attributes get only the meta_items that affect crate
  * linkage
  */
-pub fn find_linkage_metas(attrs: &[Attribute]) -> ~[@MetaItem] {
-    let mut result = ~[];
+pub fn find_linkage_metas(attrs: &[Attribute]) -> Vec<@MetaItem> {
+    let mut result = Vec::new();
     for attr in attrs.iter().filter(|at| at.name().equiv(&("link"))) {
         match attr.meta().node {
-            MetaList(_, ref items) => result.push_all(*items),
+            MetaList(_, ref items) => result.push_all(items.as_slice()),
             _ => ()
         }
     }
@@ -272,9 +273,9 @@ pub fn find_inline_attr(attrs: &[Attribute]) -> InlineAttr {
         match attr.node.value.node {
           MetaWord(ref n) if n.equiv(&("inline")) => InlineHint,
           MetaList(ref n, ref items) if n.equiv(&("inline")) => {
-            if contains_name(*items, "always") {
+            if contains_name(items.as_slice(), "always") {
                 InlineAlways
-            } else if contains_name(*items, "never") {
+            } else if contains_name(items.as_slice(), "never") {
                 InlineNever
             } else {
                 InlineHint
@@ -315,9 +316,9 @@ pub fn test_cfg<AM: AttrMetaMethods, It: Iterator<AM>>
                                 debug!("not!");
                                 // inside #[cfg(not(...))], so these need to all
                                 // not match.
-                                not_cfgs.iter().all(|mi| {
+                                !not_cfgs.iter().all(|mi| {
                                     debug!("cfg(not({}[...]))", mi.name());
-                                    !contains(cfg, *mi)
+                                    contains(cfg, *mi)
                                 })
                             }
                             _ => contains(cfg, *cfg_mi)
@@ -341,7 +342,7 @@ pub struct Stability {
 }
 
 /// The available stability levels.
-#[deriving(Eq,Ord,Clone,ToStr)]
+#[deriving(Eq,Ord,Clone,Show)]
 pub enum StabilityLevel {
     Deprecated,
     Experimental,
@@ -373,7 +374,7 @@ pub fn find_stability<AM: AttrMetaMethods, It: Iterator<AM>>(mut metas: It)
     None
 }
 
-pub fn require_unique_names(diagnostic: @SpanHandler, metas: &[@MetaItem]) {
+pub fn require_unique_names(diagnostic: &SpanHandler, metas: &[@MetaItem]) {
     let mut set = HashSet::new();
     for meta in metas.iter() {
         let name = meta.name();
@@ -398,7 +399,7 @@ pub fn require_unique_names(diagnostic: @SpanHandler, metas: &[@MetaItem]) {
  * present (before fields, if any) with that type; reprensentation
  * optimizations which would remove it will not be done.
  */
-pub fn find_repr_attr(diagnostic: @SpanHandler, attr: @ast::MetaItem, acc: ReprAttr)
+pub fn find_repr_attr(diagnostic: &SpanHandler, attr: @ast::MetaItem, acc: ReprAttr)
     -> ReprAttr {
     let mut acc = acc;
     match attr.node {
@@ -436,7 +437,7 @@ pub fn find_repr_attr(diagnostic: @SpanHandler, attr: @ast::MetaItem, acc: ReprA
         // Not a "repr" hint: ignore.
         _ => { }
     }
-    return acc;
+    acc
 }
 
 fn int_type_of_word(s: &str) -> Option<IntType> {
@@ -455,7 +456,7 @@ fn int_type_of_word(s: &str) -> Option<IntType> {
     }
 }
 
-#[deriving(Eq)]
+#[deriving(Eq, Show)]
 pub enum ReprAttr {
     ReprAny,
     ReprInt(Span, IntType),
@@ -472,7 +473,7 @@ impl ReprAttr {
     }
 }
 
-#[deriving(Eq)]
+#[deriving(Eq, Show)]
 pub enum IntType {
     SignedInt(ast::IntTy),
     UnsignedInt(ast::UintTy)

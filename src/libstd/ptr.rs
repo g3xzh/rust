@@ -163,7 +163,6 @@ pub unsafe fn read_and_zero<T>(dest: *mut T) -> T {
   SAFETY NOTE: Pointer-arithmetic. Dragons be here.
 */
 pub unsafe fn array_each_with_len<T>(arr: **T, len: uint, cb: |*T|) {
-    debug!("array_each_with_len: before iterate");
     if arr.is_null() {
         fail!("ptr::array_each_with_len failure: arr input is null pointer");
     }
@@ -172,7 +171,6 @@ pub unsafe fn array_each_with_len<T>(arr: **T, len: uint, cb: |*T|) {
         let n = arr.offset(e as int);
         cb(*n);
     }
-    debug!("array_each_with_len: after iterate");
 }
 
 /**
@@ -189,7 +187,6 @@ pub unsafe fn array_each<T>(arr: **T, cb: |*T|) {
         fail!("ptr::array_each_with_len failure: arr input is null pointer");
     }
     let len = buf_len(arr);
-    debug!("array_each inferred len: {}", len);
     array_each_with_len(arr, len, cb);
 }
 
@@ -391,7 +388,7 @@ pub mod ptr_tests {
     use cast;
     use libc;
     use str;
-    use vec::{ImmutableVector, MutableVector};
+    use slice::{ImmutableVector, MutableVector};
 
     #[test]
     fn test() {
@@ -636,6 +633,6 @@ pub mod ptr_tests {
         let mut xs = [0u8, ..20];
         let ptr = xs.as_mut_ptr();
         unsafe { set_memory(ptr, 5u8, xs.len()); }
-        assert_eq!(xs, [5u8, ..20]);
+        assert!(xs == [5u8, ..20]);
     }
 }

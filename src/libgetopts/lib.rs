@@ -80,39 +80,51 @@
 #[crate_type = "rlib"];
 #[crate_type = "dylib"];
 #[license = "MIT/ASL2"];
-#[allow(missing_doc)];
+#[doc(html_logo_url = "http://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
+      html_favicon_url = "http://www.rust-lang.org/favicon.ico",
+      html_root_url = "http://static.rust-lang.org/doc/master")];
+#[feature(globs, phase)];
+#[deny(missing_doc)];
+#[allow(deprecated_owned_vector)]; // NOTE: remove after stage0
 
-#[feature(globs)];
+#[cfg(test)] #[phase(syntax, link)] extern crate log;
 
 use std::cmp::Eq;
 use std::result::{Err, Ok};
 use std::result;
 use std::option::{Some, None};
-use std::vec;
+use std::slice;
 
 /// Name of an option. Either a string or a single char.
 #[deriving(Clone, Eq)]
-#[allow(missing_doc)]
 pub enum Name {
+    /// A string representing the long name of an option.
+    /// For example: "help"
     Long(~str),
+    /// A char representing the short name of an option.
+    /// For example: 'h'
     Short(char),
 }
 
 /// Describes whether an option has an argument.
 #[deriving(Clone, Eq)]
-#[allow(missing_doc)]
 pub enum HasArg {
+    /// The option requires an argument.
     Yes,
+    /// The option is just a flag, therefore no argument.
     No,
+    /// The option argument is optional and it could or not exist.
     Maybe,
 }
 
 /// Describes how often an option may occur.
 #[deriving(Clone, Eq)]
-#[allow(missing_doc)]
 pub enum Occur {
+    /// The option occurs once.
     Req,
+    /// The option could or not occur.
     Optional,
+    /// The option occurs once or multiple times.
     Multi,
 }
 
@@ -169,13 +181,17 @@ pub struct Matches {
 /// The type returned when the command line does not conform to the
 /// expected format. Call the `to_err_msg` method to retrieve the
 /// error as a string.
-#[deriving(Clone, Eq, ToStr)]
-#[allow(missing_doc)]
+#[deriving(Clone, Eq, Show)]
 pub enum Fail_ {
+    /// The option requires an argument but none was passed.
     ArgumentMissing(~str),
+    /// The passed option is not declared among the possible options.
     UnrecognizedOption(~str),
+    /// A required option is not present.
     OptionMissing(~str),
+    /// A single occurence option is being used multiple times.
     OptionDuplicated(~str),
+    /// There's an argument being passed to a non-argument option.
     UnexpectedArgument(~str),
 }
 
@@ -455,6 +471,25 @@ pub fn optmulti(short_name: &str, long_name: &str, desc: &str, hint: &str) -> Op
     }
 }
 
+/// Create a generic option group, stating all parameters explicitly
+pub fn opt(short_name: &str,
+           long_name: &str,
+           desc: &str,
+           hint: &str,
+           hasarg: HasArg,
+           occur: Occur) -> OptGroup {
+    let len = short_name.len();
+    assert!(len == 1 || len == 0);
+    OptGroup {
+        short_name: short_name.to_owned(),
+        long_name: long_name.to_owned(),
+        hint: hint.to_owned(),
+        desc: desc.to_owned(),
+        hasarg: hasarg,
+        occur: occur
+    }
+}
+
 impl Fail_ {
     /// Convert a `Fail_` enum into an error string.
     pub fn to_err_msg(self) -> ~str {
@@ -489,7 +524,7 @@ pub fn getopts(args: &[~str], optgrps: &[OptGroup]) -> Result {
 
     fn f(_x: uint) -> ~[Optval] { return ~[]; }
 
-    let mut vals = vec::from_fn(n_opts, f);
+    let mut vals = slice::from_fn(n_opts, f);
     let mut free: ~[~str] = ~[];
     let l = args.len();
     let mut i = 0;
@@ -1361,7 +1396,7 @@ mod tests {
                                 aliases: ~[] }];
         let verbose = reqopt("b", "banana", "some bananas", "VAL");
 
-        assert_eq!(verbose.long_to_short(), short);
+        assert!(verbose.long_to_short() == short);
     }
 
     #[test]

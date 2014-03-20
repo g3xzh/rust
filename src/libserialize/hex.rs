@@ -10,7 +10,8 @@
 
 //! Hex binary-to-text encoding
 use std::str;
-use std::vec;
+use std::slice;
+use std::fmt;
 
 /// A trait for converting a value to hexadecimal encoding
 pub trait ToHex {
@@ -38,7 +39,7 @@ impl<'a> ToHex for &'a [u8] {
      * ```
      */
     fn to_hex(&self) -> ~str {
-        let mut v = vec::with_capacity(self.len() * 2);
+        let mut v = slice::with_capacity(self.len() * 2);
         for &byte in self.iter() {
             v.push(CHARS[byte >> 4]);
             v.push(CHARS[byte & 0xf]);
@@ -65,12 +66,12 @@ pub enum FromHexError {
     InvalidHexLength,
 }
 
-impl ToStr for FromHexError {
-    fn to_str(&self) -> ~str {
+impl fmt::Show for FromHexError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
             InvalidHexCharacter(ch, idx) =>
-                format!("Invalid character '{}' at position {}", ch, idx),
-            InvalidHexLength => ~"Invalid input length",
+                write!(f.buf, "Invalid character '{}' at position {}", ch, idx),
+            InvalidHexLength => write!(f.buf, "Invalid input length"),
         }
     }
 }
@@ -105,7 +106,7 @@ impl<'a> FromHex for &'a str {
      */
     fn from_hex(&self) -> Result<~[u8], FromHexError> {
         // This may be an overestimate if there is any whitespace
-        let mut b = vec::with_capacity(self.len() / 2);
+        let mut b = slice::with_capacity(self.len() / 2);
         let mut modulus = 0;
         let mut buf = 0u8;
 

@@ -18,20 +18,27 @@ Core encoding and decoding interfaces.
 #[crate_type = "rlib"];
 #[crate_type = "dylib"];
 #[license = "MIT/ASL2"];
-#[allow(missing_doc)];
-#[forbid(non_camel_case_types)];
-#[feature(macro_rules,managed_boxes)];
+#[doc(html_logo_url = "http://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
+      html_favicon_url = "http://www.rust-lang.org/favicon.ico",
+      html_root_url = "http://static.rust-lang.org/doc/master")];
+#[feature(macro_rules, managed_boxes, default_type_params, phase)];
+#[allow(deprecated_owned_vector)]; // NOTE: remove after stage0
 
 // test harness access
 #[cfg(test)]
 extern crate test;
+#[phase(syntax, link)]
+extern crate log;
+
+extern crate collections;
 
 pub use self::serialize::{Decoder, Encoder, Decodable, Encodable,
-    DecoderHelpers, EncoderHelpers};
+                          DecoderHelpers, EncoderHelpers};
 
 mod serialize;
+mod collection_impls;
 
 pub mod base64;
 pub mod ebml;
 pub mod hex;
-
+pub mod json;

@@ -16,13 +16,11 @@ use std::sync::atomics::*;
 use std::ptr;
 
 fn main() {
-    let x = INIT_ATOMIC_FLAG;
+    let x = INIT_ATOMIC_BOOL; //~ ERROR cannot move out of static item
     let x = *&x; //~ ERROR: cannot move out of dereference
-    let x = INIT_ATOMIC_BOOL;
+    let x = INIT_ATOMIC_INT; //~ ERROR cannot move out of static item
     let x = *&x; //~ ERROR: cannot move out of dereference
-    let x = INIT_ATOMIC_INT;
-    let x = *&x; //~ ERROR: cannot move out of dereference
-    let x = INIT_ATOMIC_UINT;
+    let x = INIT_ATOMIC_UINT; //~ ERROR cannot move out of static item
     let x = *&x; //~ ERROR: cannot move out of dereference
     let x: AtomicPtr<uint> = AtomicPtr::new(ptr::mut_null());
     let x = *&x; //~ ERROR: cannot move out of dereference

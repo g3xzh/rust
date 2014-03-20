@@ -8,11 +8,11 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-
 use back::archive::{Archive, METADATA_FILENAME};
 use back::rpath;
+use back::svh::Svh;
 use driver::driver::{CrateTranslation, OutputFilenames};
-use driver::session::Session;
+use driver::session::{NoDebugInfo, Session};
 use driver::session;
 use lib::llvm::llvm;
 use lib::llvm::ModuleRef;
@@ -26,17 +26,15 @@ use util::common::time;
 use util::ppaux;
 use util::sha2::{Digest, Sha256};
 
-use std::c_str::ToCStr;
+use std::c_str::{ToCStr, CString};
 use std::char;
 use std::os::consts::{macos, freebsd, linux, android, win32};
 use std::ptr;
-use std::run;
 use std::str;
 use std::io;
-use std::io::fs;
+use std::io::{fs, TempDir, Process};
 use flate;
 use serialize::hex::ToHex;
-use extra::tempfile::TempDir;
 use syntax::abi;
 use syntax::ast;
 use syntax::ast_map::{PathElem, PathElems, PathName};
@@ -46,7 +44,7 @@ use syntax::attr::AttrMetaMethods;
 use syntax::crateid::CrateId;
 use syntax::parse::token;
 
-#[deriving(Clone, Eq, TotalOrd, TotalEq)]
+#[deriving(Clone, Eq, Ord, TotalOrd, TotalEq)]
 pub enum OutputType {
     OutputTypeBitcode,
     OutputTypeAssembly,
@@ -55,28 +53,30 @@ pub enum OutputType {
     OutputTypeExe,
 }
 
-pub fn llvm_err(sess: Session, msg: ~str) -> ! {
+pub fn llvm_err(sess: &Session, msg: ~str) -> ! {
     unsafe {
         let cstr = llvm::LLVMRustGetLastError();
         if cstr == ptr::null() {
             sess.fatal(msg);
         } else {
-            sess.fatal(msg + ": " + str::raw::from_c_str(cstr));
+            let err = CString::new(cstr, false);
+            let err = str::from_utf8_lossy(err.as_bytes());
+            sess.fatal(msg + ": " + err.as_slice());
         }
     }
 }
 
 pub fn WriteOutputFile(
-        sess: Session,
-        Target: lib::llvm::TargetMachineRef,
-        PM: lib::llvm::PassManagerRef,
-        M: ModuleRef,
-        Output: &Path,
-        FileType: lib::llvm::FileType) {
+        sess: &Session,
+        target: lib::llvm::TargetMachineRef,
+        pm: lib::llvm::PassManagerRef,
+        m: ModuleRef,
+        output: &Path,
+        file_type: lib::llvm::FileType) {
     unsafe {
-        Output.with_c_str(|Output| {
+        output.with_c_str(|output| {
             let result = llvm::LLVMRustWriteOutputFile(
-                    Target, PM, M, Output, FileType);
+                    target, pm, m, output, file_type);
             if !result {
                 llvm_err(sess, ~"could not write output");
             }
@@ -92,7 +92,7 @@ pub mod write {
     use back::link::{OutputTypeExe, OutputTypeLlvmAssembly};
     use back::link::{OutputTypeObject};
     use driver::driver::{CrateTranslation, OutputFilenames};
-    use driver::session::Session;
+    use driver::session::{NoDebugInfo, Session};
     use driver::session;
     use lib::llvm::llvm;
     use lib::llvm::{ModuleRef, TargetMachineRef, PassManagerRef};
@@ -101,8 +101,8 @@ pub mod write {
     use syntax::abi;
 
     use std::c_str::ToCStr;
+    use std::io::Process;
     use std::libc::{c_uint, c_int};
-    use std::run;
     use std::str;
 
     // On android, we by default compile for armv7 processors. This enables
@@ -123,7 +123,7 @@ pub mod write {
         }
     }
 
-    pub fn run_passes(sess: Session,
+    pub fn run_passes(sess: &Session,
                       trans: &CrateTranslation,
                       output_types: &[OutputType],
                       output: &OutputFilenames) {
@@ -138,7 +138,7 @@ pub mod write {
                 })
             }
 
-            let OptLevel = match sess.opts.optimize {
+            let opt_level = match sess.opts.optimize {
               session::No => lib::llvm::CodeGenLevelNone,
               session::Less => lib::llvm::CodeGenLevelLess,
               session::Default => lib::llvm::CodeGenLevelDefault,
@@ -148,18 +148,18 @@ pub mod write {
 
             // FIXME: #11906: Omitting frame pointers breaks retrieving the value of a parameter.
             // FIXME: #11954: mac64 unwinding may not work with fp elim
-            let no_fp_elim = sess.opts.debuginfo ||
+            let no_fp_elim = (sess.opts.debuginfo != NoDebugInfo) ||
                              (sess.targ_cfg.os == abi::OsMacos &&
                               sess.targ_cfg.arch == abi::X86_64);
 
-            let tm = sess.targ_cfg.target_strs.target_triple.with_c_str(|T| {
-                sess.opts.cg.target_cpu.with_c_str(|CPU| {
-                    target_feature(&sess).with_c_str(|Features| {
+            let tm = sess.targ_cfg.target_strs.target_triple.with_c_str(|t| {
+                sess.opts.cg.target_cpu.with_c_str(|cpu| {
+                    target_feature(sess).with_c_str(|features| {
                         llvm::LLVMRustCreateTargetMachine(
-                            T, CPU, Features,
+                            t, cpu, features,
                             lib::llvm::CodeModelDefault,
                             lib::llvm::RelocPIC,
-                            OptLevel,
+                            opt_level,
                             true,
                             use_softfp,
                             no_fp_elim
@@ -185,7 +185,7 @@ pub mod write {
             if !sess.opts.cg.no_prepopulate_passes {
                 llvm::LLVMRustAddAnalysisPasses(tm, fpm, llmod);
                 llvm::LLVMRustAddAnalysisPasses(tm, mpm, llmod);
-                populate_llvm_passes(fpm, mpm, llmod, OptLevel);
+                populate_llvm_passes(fpm, mpm, llmod, opt_level);
             }
 
             for pass in sess.opts.cg.passes.iter() {
@@ -220,7 +220,7 @@ pub mod write {
 
             if sess.lto() {
                 time(sess.time_passes(), "all lto passes", (), |()|
-                     lto::run(sess, llmod, tm, trans.reachable));
+                     lto::run(sess, llmod, tm, trans.reachable.as_slice()));
 
                 if sess.opts.cg.save_temps {
                     output.with_extension("lto.bc").with_c_str(|buf| {
@@ -321,7 +321,7 @@ pub mod write {
         }
     }
 
-    pub fn run_assembler(sess: Session, outputs: &OutputFilenames) {
+    pub fn run_assembler(sess: &Session, outputs: &OutputFilenames) {
         let cc = super::get_cc_prog(sess);
         let assembly = outputs.temp_path(OutputTypeAssembly);
         let object = outputs.path(OutputTypeObject);
@@ -333,7 +333,7 @@ pub mod write {
             assembly.as_str().unwrap().to_owned()];
 
         debug!("{} '{}'", cc, args.connect("' '"));
-        match run::process_output(cc, args) {
+        match Process::output(cc, args) {
             Ok(prog) => {
                 if !prog.status.success() {
                     sess.err(format!("linking with `{}` failed: {}", cc, prog.status));
@@ -349,7 +349,7 @@ pub mod write {
         }
     }
 
-    unsafe fn configure_llvm(sess: Session) {
+    unsafe fn configure_llvm(sess: &Session) {
         use sync::one::{Once, ONCE_INIT};
         static mut INIT: Once = ONCE_INIT;
 
@@ -361,8 +361,8 @@ pub mod write {
         let vectorize_slp = !sess.opts.cg.no_vectorize_slp &&
                             sess.opts.optimize == session::Aggressive;
 
-        let mut llvm_c_strs = ~[];
-        let mut llvm_args = ~[];
+        let mut llvm_c_strs = Vec::new();
+        let mut llvm_args = Vec::new();
         {
             let add = |arg: &str| {
                 let s = arg.to_c_str();
@@ -499,28 +499,29 @@ pub mod write {
  *    system linkers understand.
  */
 
-pub fn build_link_meta(attrs: &[ast::Attribute],
-                       output: &OutputFilenames,
-                       symbol_hasher: &mut Sha256)
-                       -> LinkMeta {
-    // This calculates CMH as defined above
-    fn crate_hash(symbol_hasher: &mut Sha256, crateid: &CrateId) -> ~str {
-        symbol_hasher.reset();
-        symbol_hasher.input_str(crateid.to_str());
-        truncated_hash_result(symbol_hasher)
-    }
-
-    let crateid = match attr::find_crateid(attrs) {
-        None => from_str(output.out_filestem).unwrap(),
+pub fn find_crate_id(attrs: &[ast::Attribute], out_filestem: &str) -> CrateId {
+    match attr::find_crateid(attrs) {
+        None => from_str(out_filestem).unwrap(),
         Some(s) => s,
-    };
-
-    let hash = crate_hash(symbol_hasher, &crateid);
-
-    LinkMeta {
-        crateid: crateid,
-        crate_hash: hash,
     }
+}
+
+pub fn crate_id_hash(crate_id: &CrateId) -> ~str {
+    // This calculates CMH as defined above. Note that we don't use the path of
+    // the crate id in the hash because lookups are only done by (name/vers),
+    // not by path.
+    let mut s = Sha256::new();
+    s.input_str(crate_id.short_name_with_version());
+    truncated_hash_result(&mut s).slice_to(8).to_owned()
+}
+
+pub fn build_link_meta(krate: &ast::Crate, out_filestem: &str) -> LinkMeta {
+    let r = LinkMeta {
+        crateid: find_crate_id(krate.attrs.as_slice(), out_filestem),
+        crate_hash: Svh::calculate(krate),
+    };
+    info!("{}", r);
+    return r;
 }
 
 fn truncated_hash_result(symbol_hasher: &mut Sha256) -> ~str {
@@ -531,7 +532,7 @@ fn truncated_hash_result(symbol_hasher: &mut Sha256) -> ~str {
 
 
 // This calculates STH for a symbol, as defined above
-fn symbol_hash(tcx: ty::ctxt, symbol_hasher: &mut Sha256,
+fn symbol_hash(tcx: &ty::ctxt, symbol_hasher: &mut Sha256,
                t: ty::t, link_meta: &LinkMeta) -> ~str {
     // NB: do *not* use abbrevs here as we want the symbol names
     // to be independent of one another in the crate.
@@ -539,7 +540,7 @@ fn symbol_hash(tcx: ty::ctxt, symbol_hasher: &mut Sha256,
     symbol_hasher.reset();
     symbol_hasher.input_str(link_meta.crateid.name);
     symbol_hasher.input_str("-");
-    symbol_hasher.input_str(link_meta.crate_hash);
+    symbol_hasher.input_str(link_meta.crate_hash.as_str());
     symbol_hasher.input_str("-");
     symbol_hasher.input_str(encoder::encoded_ty(tcx, t));
     let mut hash = truncated_hash_result(symbol_hasher);
@@ -556,7 +557,7 @@ fn get_symbol_hash(ccx: &CrateContext, t: ty::t) -> ~str {
 
     let mut type_hashcodes = ccx.type_hashcodes.borrow_mut();
     let mut symbol_hasher = ccx.symbol_hasher.borrow_mut();
-    let hash = symbol_hash(ccx.tcx, symbol_hasher.get(), t, &ccx.link_meta);
+    let hash = symbol_hash(ccx.tcx(), symbol_hasher.get(), t, &ccx.link_meta);
     type_hashcodes.get().insert(t, hash.clone());
     hash
 }
@@ -691,7 +692,7 @@ pub fn mangle_exported_name(ccx: &CrateContext, path: PathElems,
 pub fn mangle_internal_name_by_type_only(ccx: &CrateContext,
                                          t: ty::t,
                                          name: &str) -> ~str {
-    let s = ppaux::ty_to_short_str(ccx.tcx, t);
+    let s = ppaux::ty_to_short_str(ccx.tcx(), t);
     let path = [PathName(token::intern(name)),
                 PathName(token::intern(s))];
     let hash = get_symbol_hash(ccx, t);
@@ -701,7 +702,7 @@ pub fn mangle_internal_name_by_type_only(ccx: &CrateContext,
 pub fn mangle_internal_name_by_type_and_seq(ccx: &CrateContext,
                                             t: ty::t,
                                             name: &str) -> ~str {
-    let s = ppaux::ty_to_str(ccx.tcx, t);
+    let s = ppaux::ty_to_str(ccx.tcx(), t);
     let path = [PathName(token::intern(s)),
                 gensym_name(name)];
     let hash = get_symbol_hash(ccx, t);
@@ -712,14 +713,11 @@ pub fn mangle_internal_name_by_path_and_seq(path: PathElems, flav: &str) -> ~str
     mangle(path.chain(Some(gensym_name(flav)).move_iter()), None, None)
 }
 
-pub fn output_lib_filename(lm: &LinkMeta) -> ~str {
-    format!("{}-{}-{}",
-            lm.crateid.name,
-            lm.crate_hash.slice_chars(0, 8),
-            lm.crateid.version_or_default())
+pub fn output_lib_filename(id: &CrateId) -> ~str {
+    format!("{}-{}-{}", id.name, crate_id_hash(id), id.version_or_default())
 }
 
-pub fn get_cc_prog(sess: Session) -> ~str {
+pub fn get_cc_prog(sess: &Session) -> ~str {
     match sess.opts.cg.linker {
         Some(ref linker) => return linker.to_owned(),
         None => {}
@@ -737,7 +735,7 @@ pub fn get_cc_prog(sess: Session) -> ~str {
     get_system_tool(sess, "cc")
 }
 
-pub fn get_ar_prog(sess: Session) -> ~str {
+pub fn get_ar_prog(sess: &Session) -> ~str {
     match sess.opts.cg.ar {
         Some(ref ar) => return ar.to_owned(),
         None => {}
@@ -746,7 +744,7 @@ pub fn get_ar_prog(sess: Session) -> ~str {
     get_system_tool(sess, "ar")
 }
 
-fn get_system_tool(sess: Session, tool: &str) -> ~str {
+fn get_system_tool(sess: &Session, tool: &str) -> ~str {
     match sess.targ_cfg.os {
         abi::OsAndroid => match sess.opts.cg.android_cross_path {
             Some(ref path) => {
@@ -765,7 +763,7 @@ fn get_system_tool(sess: Session, tool: &str) -> ~str {
     }
 }
 
-fn remove(sess: Session, path: &Path) {
+fn remove(sess: &Session, path: &Path) {
     match fs::unlink(path) {
         Ok(..) => {}
         Err(e) => {
@@ -776,14 +774,14 @@ fn remove(sess: Session, path: &Path) {
 
 /// Perform the linkage portion of the compilation phase. This will generate all
 /// of the requested outputs for this compilation session.
-pub fn link_binary(sess: Session,
+pub fn link_binary(sess: &Session,
                    trans: &CrateTranslation,
                    outputs: &OutputFilenames,
-                   lm: &LinkMeta) -> ~[Path] {
-    let mut out_filenames = ~[];
+                   id: &CrateId) -> Vec<Path> {
+    let mut out_filenames = Vec::new();
     let crate_types = sess.crate_types.borrow();
     for &crate_type in crate_types.get().iter() {
-        let out_file = link_binary_output(sess, trans, crate_type, outputs, lm);
+        let out_file = link_binary_output(sess, trans, crate_type, outputs, id);
         out_filenames.push(out_file);
     }
 
@@ -807,8 +805,8 @@ fn is_writeable(p: &Path) -> bool {
 }
 
 pub fn filename_for_input(sess: &Session, crate_type: session::CrateType,
-                          lm: &LinkMeta, out_filename: &Path) -> Path {
-    let libname = output_lib_filename(lm);
+                          id: &CrateId, out_filename: &Path) -> Path {
+    let libname = output_lib_filename(id);
     match crate_type {
         session::CrateTypeRlib => {
             out_filename.with_filename(format!("lib{}.rlib", libname))
@@ -830,17 +828,17 @@ pub fn filename_for_input(sess: &Session, crate_type: session::CrateType,
     }
 }
 
-fn link_binary_output(sess: Session,
+fn link_binary_output(sess: &Session,
                       trans: &CrateTranslation,
                       crate_type: session::CrateType,
                       outputs: &OutputFilenames,
-                      lm: &LinkMeta) -> Path {
+                      id: &CrateId) -> Path {
     let obj_filename = outputs.temp_path(OutputTypeObject);
     let out_filename = match outputs.single_output_file {
         Some(ref file) => file.clone(),
         None => {
             let out_filename = outputs.path(OutputTypeExe);
-            filename_for_input(&sess, crate_type, lm, &out_filename)
+            filename_for_input(sess, crate_type, id, &out_filename)
         }
     };
 
@@ -883,10 +881,10 @@ fn link_binary_output(sess: Session,
 // rlib primarily contains the object file of the crate, but it also contains
 // all of the object files from native libraries. This is done by unzipping
 // native libraries and inserting all of the contents into this archive.
-fn link_rlib(sess: Session,
-             trans: Option<&CrateTranslation>, // None == no metadata/bytecode
-             obj_filename: &Path,
-             out_filename: &Path) -> Archive {
+fn link_rlib<'a>(sess: &'a Session,
+                 trans: Option<&CrateTranslation>, // None == no metadata/bytecode
+                 obj_filename: &Path,
+                 out_filename: &Path) -> Archive<'a> {
     let mut a = Archive::create(sess, out_filename, obj_filename);
 
     let used_libraries = sess.cstore.get_used_libraries();
@@ -929,7 +927,8 @@ fn link_rlib(sess: Session,
             // the same filename for metadata (stomping over one another)
             let tmpdir = TempDir::new("rustc").expect("needs a temp dir");
             let metadata = tmpdir.path().join(METADATA_FILENAME);
-            match fs::File::create(&metadata).write(trans.metadata) {
+            match fs::File::create(&metadata).write(trans.metadata
+                                                         .as_slice()) {
                 Ok(..) => {}
                 Err(e) => {
                     sess.err(format!("failed to write {}: {}",
@@ -944,7 +943,7 @@ fn link_rlib(sess: Session,
             // into the archive.
             let bc = obj_filename.with_extension("bc");
             match fs::File::open(&bc).read_to_end().and_then(|data| {
-                fs::File::create(&bc).write(flate::deflate_bytes(data))
+                fs::File::create(&bc).write(flate::deflate_bytes(data).as_slice())
             }) {
                 Ok(()) => {}
                 Err(e) => {
@@ -984,7 +983,7 @@ fn link_rlib(sess: Session,
 // There's no need to include metadata in a static archive, so ensure to not
 // link in the metadata object file (and also don't prepare the archive with a
 // metadata file).
-fn link_staticlib(sess: Session, obj_filename: &Path, out_filename: &Path) {
+fn link_staticlib(sess: &Session, obj_filename: &Path, out_filename: &Path) {
     let mut a = link_rlib(sess, None, obj_filename, out_filename);
     a.add_native_library("morestack").unwrap();
     a.add_native_library("compiler-rt").unwrap();
@@ -999,7 +998,7 @@ fn link_staticlib(sess: Session, obj_filename: &Path, out_filename: &Path) {
             }
         };
         a.add_rlib(&p, name, sess.lto()).unwrap();
-        let native_libs = csearch::get_native_libraries(sess.cstore, cnum);
+        let native_libs = csearch::get_native_libraries(&sess.cstore, cnum);
         for &(kind, ref lib) in native_libs.iter() {
             let name = match kind {
                 cstore::NativeStatic => "static library",
@@ -1015,7 +1014,7 @@ fn link_staticlib(sess: Session, obj_filename: &Path, out_filename: &Path) {
 //
 // This will invoke the system linker/cc to create the resulting file. This
 // links to all upstream files as well.
-fn link_natively(sess: Session, dylib: bool, obj_filename: &Path,
+fn link_natively(sess: &Session, dylib: bool, obj_filename: &Path,
                  out_filename: &Path) {
     let tmpdir = TempDir::new("rustc").expect("needs a temp dir");
     // The invocations of cc share some flags across platforms
@@ -1033,7 +1032,7 @@ fn link_natively(sess: Session, dylib: bool, obj_filename: &Path,
     // Invoke the system linker
     debug!("{} {}", cc_prog, cc_args.connect(" "));
     let prog = time(sess.time_passes(), "running linker", (), |()|
-                    run::process_output(cc_prog, cc_args));
+                    Process::output(cc_prog, cc_args.as_slice()));
     match prog {
         Ok(prog) => {
             if !prog.status.success() {
@@ -1052,9 +1051,9 @@ fn link_natively(sess: Session, dylib: bool, obj_filename: &Path,
 
     // On OSX, debuggers need this utility to get run to do some munging of
     // the symbols
-    if sess.targ_cfg.os == abi::OsMacos && sess.opts.debuginfo {
+    if sess.targ_cfg.os == abi::OsMacos && (sess.opts.debuginfo != NoDebugInfo) {
         // FIXME (#9639): This needs to handle non-utf8 paths
-        match run::process_status("dsymutil",
+        match Process::status("dsymutil",
                                   [out_filename.as_str().unwrap().to_owned()]) {
             Ok(..) => {}
             Err(e) => {
@@ -1065,24 +1064,41 @@ fn link_natively(sess: Session, dylib: bool, obj_filename: &Path,
     }
 }
 
-fn link_args(sess: Session,
+fn link_args(sess: &Session,
              dylib: bool,
              tmpdir: &Path,
              obj_filename: &Path,
-             out_filename: &Path) -> ~[~str] {
+             out_filename: &Path) -> Vec<~str> {
 
     // The default library location, we need this to find the runtime.
     // The location of crates will be determined as needed.
     // FIXME (#9639): This needs to handle non-utf8 paths
-    let lib_path = sess.filesearch.get_target_lib_path();
+    let lib_path = sess.filesearch().get_target_lib_path();
     let stage: ~str = ~"-L" + lib_path.as_str().unwrap();
 
-    let mut args = ~[stage];
+    let mut args = vec!(stage);
 
     // FIXME (#9639): This needs to handle non-utf8 paths
     args.push_all([
         ~"-o", out_filename.as_str().unwrap().to_owned(),
         obj_filename.as_str().unwrap().to_owned()]);
+
+    // Stack growth requires statically linking a __morestack function. Note
+    // that this is listed *before* all other libraries, even though it may be
+    // used to resolve symbols in other libraries. The only case that this
+    // wouldn't be pulled in by the object file is if the object file had no
+    // functions.
+    //
+    // If we're building an executable, there must be at least one function (the
+    // main function), and if we're building a dylib then we don't need it for
+    // later libraries because they're all dylibs (not rlibs).
+    //
+    // I'm honestly not entirely sure why this needs to come first. Apparently
+    // the --as-needed flag above sometimes strips out libstd from the command
+    // line, but inserting this farther to the left makes the
+    // "rust_stack_exhausted" symbol an outstanding undefined symbol, which
+    // flags libstd as a required library (or whatever provides the symbol).
+    args.push(~"-lmorestack");
 
     // When linking a dynamic library, we put the metadata into a section of the
     // executable. This metadata is in a separate object file from the main
@@ -1132,8 +1148,41 @@ fn link_args(sess: Session,
         args.push(~"-Wl,--allow-multiple-definition");
     }
 
-    add_local_native_libraries(&mut args, sess);
+    // Take careful note of the ordering of the arguments we pass to the linker
+    // here. Linkers will assume that things on the left depend on things to the
+    // right. Things on the right cannot depend on things on the left. This is
+    // all formally implemented in terms of resolving symbols (libs on the right
+    // resolve unknown symbols of libs on the left, but not vice versa).
+    //
+    // For this reason, we have organized the arguments we pass to the linker as
+    // such:
+    //
+    //  1. The local object that LLVM just generated
+    //  2. Upstream rust libraries
+    //  3. Local native libraries
+    //  4. Upstream native libraries
+    //
+    // This is generally fairly natural, but some may expect 2 and 3 to be
+    // swapped. The reason that all native libraries are put last is that it's
+    // not recommended for a native library to depend on a symbol from a rust
+    // crate. If this is the case then a staticlib crate is recommended, solving
+    // the problem.
+    //
+    // Additionally, it is occasionally the case that upstream rust libraries
+    // depend on a local native library. In the case of libraries such as
+    // lua/glfw/etc the name of the library isn't the same across all platforms,
+    // so only the consumer crate of a library knows the actual name. This means
+    // that downstream crates will provide the #[link] attribute which upstream
+    // crates will depend on. Hence local native libraries are after out
+    // upstream rust crates.
+    //
+    // In theory this means that a symbol in an upstream native library will be
+    // shadowed by a local native library when it wouldn't have been before, but
+    // this kind of behavior is pretty platform specific and generally not
+    // recommended anyway, so I don't think we're shooting ourself in the foot
+    // much with that.
     add_upstream_rust_crates(&mut args, sess, dylib, tmpdir);
+    add_local_native_libraries(&mut args, sess);
     add_upstream_native_libraries(&mut args, sess);
 
     // # Telling the linker what we're doing
@@ -1163,19 +1212,21 @@ fn link_args(sess: Session,
     // where extern libraries might live, based on the
     // addl_lib_search_paths
     if !sess.opts.cg.no_rpath {
-        args.push_all(rpath::get_rpath_flags(sess, out_filename));
+        args.push_all(rpath::get_rpath_flags(sess, out_filename).as_slice());
     }
 
-    // Stack growth requires statically linking a __morestack function
-    args.push(~"-lmorestack");
-    // compiler-rt contains implementations of low-level LLVM helpers
-    // It should go before platform and user libraries, so it has first dibs
-    // at resolving symbols that also appear in libgcc.
+    // compiler-rt contains implementations of low-level LLVM helpers. This is
+    // used to resolve symbols from the object file we just created, as well as
+    // any system static libraries that may be expecting gcc instead. Most
+    // symbols in libgcc also appear in compiler-rt.
+    //
+    // This is the end of the command line, so this library is used to resolve
+    // *all* undefined symbols in all other libraries, and this is intentional.
     args.push(~"-lcompiler-rt");
 
     // Finally add all the linker arguments provided on the command line along
     // with any #[link_args] attributes found inside the crate
-    args.push_all(sess.opts.cg.link_args);
+    args.push_all(sess.opts.cg.link_args.as_slice());
     let used_link_args = sess.cstore.get_used_link_args();
     let used_link_args = used_link_args.borrow();
     for arg in used_link_args.get().iter() {
@@ -1195,7 +1246,7 @@ fn link_args(sess: Session,
 // Also note that the native libraries linked here are only the ones located
 // in the current crate. Upstream crates with native library dependencies
 // may have their native library pulled in above.
-fn add_local_native_libraries(args: &mut ~[~str], sess: Session) {
+fn add_local_native_libraries(args: &mut Vec<~str>, sess: &Session) {
     let addl_lib_search_paths = sess.opts.addl_lib_search_paths.borrow();
     for path in addl_lib_search_paths.get().iter() {
         // FIXME (#9639): This needs to handle non-utf8 paths
@@ -1228,7 +1279,7 @@ fn add_local_native_libraries(args: &mut ~[~str], sess: Session) {
 // Rust crates are not considered at all when creating an rlib output. All
 // dependencies will be linked when producing the final output (instead of
 // the intermediate rlib version)
-fn add_upstream_rust_crates(args: &mut ~[~str], sess: Session,
+fn add_upstream_rust_crates(args: &mut Vec<~str>, sess: &Session,
                             dylib: bool, tmpdir: &Path) {
 
     // As a limitation of the current implementation, we require that everything
@@ -1249,8 +1300,8 @@ fn add_upstream_rust_crates(args: &mut ~[~str], sess: Session,
     // * If one form of linking fails, the second is also attempted
     // * If both forms fail, then we emit an error message
 
-    let dynamic = get_deps(sess.cstore, cstore::RequireDynamic);
-    let statik = get_deps(sess.cstore, cstore::RequireStatic);
+    let dynamic = get_deps(&sess.cstore, cstore::RequireDynamic);
+    let statik = get_deps(&sess.cstore, cstore::RequireStatic);
     match (dynamic, statik, sess.opts.cg.prefer_dynamic, dylib) {
         (_, Some(deps), false, false) => {
             add_static_crates(args, sess, tmpdir, deps)
@@ -1299,9 +1350,8 @@ fn add_upstream_rust_crates(args: &mut ~[~str], sess: Session,
     }
 
     // Converts a library file-stem into a cc -l argument
-    fn unlib(config: @session::Config, stem: &str) -> ~str {
-        if stem.starts_with("lib") &&
-            config.os != abi::OsWin32 {
+    fn unlib(config: &session::Config, stem: &str) -> ~str {
+        if stem.starts_with("lib") && config.os != abi::OsWin32 {
             stem.slice(3, stem.len()).to_owned()
         } else {
             stem.to_owned()
@@ -1312,7 +1362,7 @@ fn add_upstream_rust_crates(args: &mut ~[~str], sess: Session,
     // returning `None` if not all libraries could be found with that
     // preference.
     fn get_deps(cstore: &cstore::CStore,  preference: cstore::LinkagePreference)
-            -> Option<~[(ast::CrateNum, Path)]>
+            -> Option<Vec<(ast::CrateNum, Path)> >
     {
         let crates = cstore.get_used_crates(preference);
         if crates.iter().all(|&(_, ref p)| p.is_some()) {
@@ -1323,8 +1373,8 @@ fn add_upstream_rust_crates(args: &mut ~[~str], sess: Session,
     }
 
     // Adds the static "rlib" versions of all crates to the command line.
-    fn add_static_crates(args: &mut ~[~str], sess: Session, tmpdir: &Path,
-                         crates: ~[(ast::CrateNum, Path)]) {
+    fn add_static_crates(args: &mut Vec<~str>, sess: &Session, tmpdir: &Path,
+                         crates: Vec<(ast::CrateNum, Path)>) {
         for (cnum, cratepath) in crates.move_iter() {
             // When performing LTO on an executable output, all of the
             // bytecode from the upstream libraries has already been
@@ -1370,8 +1420,8 @@ fn add_upstream_rust_crates(args: &mut ~[~str], sess: Session,
     }
 
     // Same thing as above, but for dynamic crates instead of static crates.
-    fn add_dynamic_crates(args: &mut ~[~str], sess: Session,
-                          crates: ~[(ast::CrateNum, Path)]) {
+    fn add_dynamic_crates(args: &mut Vec<~str>, sess: &Session,
+                          crates: Vec<(ast::CrateNum, Path)> ) {
         // If we're performing LTO, then it should have been previously required
         // that all upstream rust dependencies were available in an rlib format.
         assert!(!sess.lto());
@@ -1381,7 +1431,7 @@ fn add_upstream_rust_crates(args: &mut ~[~str], sess: Session,
             // what its name is
             let dir = cratepath.dirname_str().unwrap();
             if !dir.is_empty() { args.push("-L" + dir); }
-            let libarg = unlib(sess.targ_cfg, cratepath.filestem_str().unwrap());
+            let libarg = unlib(&sess.targ_cfg, cratepath.filestem_str().unwrap());
             args.push("-l" + libarg);
         }
     }
@@ -1405,8 +1455,8 @@ fn add_upstream_rust_crates(args: &mut ~[~str], sess: Session,
 // generic function calls a native function, then the generic function must
 // be instantiated in the target crate, meaning that the native symbol must
 // also be resolved in the target crate.
-fn add_upstream_native_libraries(args: &mut ~[~str], sess: Session) {
-    let cstore = sess.cstore;
+fn add_upstream_native_libraries(args: &mut Vec<~str>, sess: &Session) {
+    let cstore = &sess.cstore;
     cstore.iter_crate_data(|cnum, _| {
         let libs = csearch::get_native_libraries(cstore, cnum);
         for &(kind, ref lib) in libs.iter() {

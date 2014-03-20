@@ -104,9 +104,6 @@ pub mod env;
 /// The local, managed heap
 pub mod local_heap;
 
-/// The Logger trait and implementations
-pub mod logging;
-
 /// Crate map
 pub mod crate_map;
 
@@ -119,6 +116,12 @@ mod thread_local_storage;
 /// Stack unwinding
 pub mod unwind;
 
+/// The interface to libunwind that rust is using.
+mod libunwind;
+
+/// Simple backtrace functionality (to print on failure)
+pub mod backtrace;
+
 /// Just stuff
 mod util;
 
@@ -127,6 +130,9 @@ pub mod args;
 
 // Support for running procedures when a program has exited.
 mod at_exit_imp;
+
+// Bookkeeping for task counts
+pub mod bookkeeping;
 
 // Stack overflow protection
 pub mod stack;
@@ -174,7 +180,6 @@ pub fn init(argc: int, argv: **u8) {
     unsafe {
         args::init(argc, argv);
         env::init();
-        logging::init();
         local_ptr::init();
         at_exit_imp::init();
     }
@@ -207,6 +212,7 @@ pub fn at_exit(f: proc()) {
 /// Invoking cleanup while portions of the runtime are still in use may cause
 /// undefined behavior.
 pub unsafe fn cleanup() {
+    bookkeeping::wait_for_other_tasks();
     at_exit_imp::run();
     args::cleanup();
     local_ptr::cleanup();

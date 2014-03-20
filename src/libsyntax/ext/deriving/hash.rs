@@ -13,7 +13,6 @@ use codemap::Span;
 use ext::base::ExtCtxt;
 use ext::build::AstBuilder;
 use ext::deriving::generic::*;
-use parse::token::InternedString;
 
 pub fn expand_deriving_hash(cx: &mut ExtCtxt,
                             span: Span,
@@ -21,36 +20,37 @@ pub fn expand_deriving_hash(cx: &mut ExtCtxt,
                             item: @Item,
                             push: |@Item|) {
 
-    let allow_default_type_param_usage = cx.attribute(
-        span,
-        cx.meta_list(
-            span,
-            InternedString::new("allow"),
-            ~[cx.meta_word(span, InternedString::new("default_type_param_usage"))]));
-
+    let (path, generics, args) = if cx.ecfg.deriving_hash_type_parameter {
+        (Path::new_(vec!("std", "hash", "Hash"), None,
+                    vec!(~Literal(Path::new_local("__S"))), true),
+         LifetimeBounds {
+             lifetimes: Vec::new(),
+             bounds: vec!(("__S", vec!(Path::new(vec!("std", "io", "Writer"))))),
+         },
+         Path::new_local("__S"))
+    } else {
+        (Path::new(vec!("std", "hash", "Hash")),
+         LifetimeBounds::empty(),
+         Path::new(vec!("std", "hash", "sip", "SipState")))
+    };
     let hash_trait_def = TraitDef {
         span: span,
-        attributes: ~[allow_default_type_param_usage],
-        path: Path::new_(~["std", "hash", "Hash"], None,
-                         ~[~Literal(Path::new_local("__H"))], true),
-        additional_bounds: ~[],
-        generics: LifetimeBounds {
-            lifetimes: ~[],
-            bounds: ~[("__H", ~[Path::new(~["std", "io", "Writer"])])],
-        },
-        methods: ~[
+        attributes: Vec::new(),
+        path: path,
+        additional_bounds: Vec::new(),
+        generics: generics,
+        methods: vec!(
             MethodDef {
                 name: "hash",
                 generics: LifetimeBounds::empty(),
                 explicit_self: borrowed_explicit_self(),
-                args: ~[Ptr(~Literal(Path::new_local("__H")),
-                            Borrowed(None, MutMutable))],
+                args: vec!(Ptr(~Literal(args), Borrowed(None, MutMutable))),
                 ret_ty: nil_ty(),
                 inline: true,
                 const_nonmatching: false,
                 combine_substructure: hash_substructure
             }
-        ]
+        )
     };
 
     hash_trait_def.expand(cx, mitem, item, push);
@@ -63,10 +63,10 @@ fn hash_substructure(cx: &mut ExtCtxt, trait_span: Span, substr: &Substructure) 
     };
     let hash_ident = substr.method_ident;
     let call_hash = |span, thing_expr| {
-        let expr = cx.expr_method_call(span, thing_expr, hash_ident, ~[state_expr]);
+        let expr = cx.expr_method_call(span, thing_expr, hash_ident, vec!(state_expr));
         cx.stmt_expr(expr)
     };
-    let mut stmts = ~[];
+    let mut stmts = Vec::new();
 
     let fields = match *substr.fields {
         Struct(ref fs) => fs,

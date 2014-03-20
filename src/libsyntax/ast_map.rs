@@ -18,10 +18,10 @@ use parse::token;
 use print::pprust;
 use util::small_vector::SmallVector;
 
-use std::logging;
 use std::cell::RefCell;
 use std::iter;
-use std::vec;
+use std::slice;
+use std::fmt;
 
 #[deriving(Clone, Eq)]
 pub enum PathElem {
@@ -37,9 +37,10 @@ impl PathElem {
     }
 }
 
-impl ToStr for PathElem {
-    fn to_str(&self) -> ~str {
-        token::get_name(self.name()).get().to_str()
+impl fmt::Show for PathElem {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let slot = token::get_name(self.name());
+        write!(f.buf, "{}", slot.get())
     }
 }
 
@@ -63,9 +64,9 @@ impl<'a> Iterator<PathElem> for LinkedPath<'a> {
     }
 }
 
-// HACK(eddyb) move this into libstd (value wrapper for vec::Items).
+// HACK(eddyb) move this into libstd (value wrapper for slice::Items).
 #[deriving(Clone)]
-pub struct Values<'a, T>(vec::Items<'a, T>);
+pub struct Values<'a, T>(slice::Items<'a, T>);
 
 impl<'a, T: Pod> Iterator<T> for Values<'a, T> {
     fn next(&mut self) -> Option<T> {
@@ -105,7 +106,6 @@ pub enum Node {
 
     /// NodeStructCtor represents a tuple struct.
     NodeStructCtor(@StructDef),
-    NodeCalleeScope(@Expr),
 }
 
 // The odd layout is to bring down the total size.
@@ -126,7 +126,6 @@ enum MapEntry {
     EntryLocal(NodeId, @Pat),
     EntryBlock(NodeId, P<Block>),
     EntryStructCtor(NodeId, @StructDef),
-    EntryCalleeScope(NodeId, @Expr),
 
     // Roots for node trees.
     RootCrate,
@@ -134,7 +133,7 @@ enum MapEntry {
 }
 
 struct InlinedParent {
-    path: ~[PathElem],
+    path: Vec<PathElem> ,
     // Required by NodeTraitMethod and NodeMethod.
     def_id: DefId
 }
@@ -153,7 +152,6 @@ impl MapEntry {
             EntryLocal(id, _) => id,
             EntryBlock(id, _) => id,
             EntryStructCtor(id, _) => id,
-            EntryCalleeScope(id, _) => id,
             _ => return None
         })
     }
@@ -171,7 +169,6 @@ impl MapEntry {
             EntryLocal(_, p) => NodeLocal(p),
             EntryBlock(_, p) => NodeBlock(p),
             EntryStructCtor(_, p) => NodeStructCtor(p),
-            EntryCalleeScope(_, p) => NodeCalleeScope(p),
             _ => return None
         })
     }
@@ -187,13 +184,17 @@ pub struct Map {
     ///
     /// Also, indexing is pretty quick when you've got a vector and
     /// plain old integers.
-    priv map: RefCell<~[MapEntry]>
+    priv map: RefCell<Vec<MapEntry> >
 }
 
 impl Map {
     fn find_entry(&self, id: NodeId) -> Option<MapEntry> {
         let map = self.map.borrow();
-        map.get().get(id as uint).map(|x| *x)
+        if map.get().len() > id as uint {
+            Some(*map.get().get(id as uint))
+        } else {
+            None
+        }
     }
 
     /// Retrieve the Node corresponding to `id`, failing if it cannot
@@ -366,7 +367,6 @@ impl Map {
             Some(NodeArg(pat)) | Some(NodeLocal(pat)) => pat.span,
             Some(NodeBlock(block)) => block.span,
             Some(NodeStructCtor(_)) => self.expect_item(self.get_parent(id)).span,
-            Some(NodeCalleeScope(expr)) => expr.span,
             _ => fail!("node_span: could not find span for id {}", id),
         }
     }
@@ -491,11 +491,6 @@ impl<'a, F: FoldOps> Folder for Ctx<'a, F> {
 
         self.insert(expr.id, EntryExpr(self.parent, expr));
 
-        // Expressions which are or might be calls:
-        for callee_id in expr.get_callee_id().iter() {
-            self.insert(*callee_id, EntryCalleeScope(self.parent, expr));
-        }
-
         expr
     }
 
@@ -530,7 +525,7 @@ impl<'a, F: FoldOps> Folder for Ctx<'a, F> {
 }
 
 pub fn map_crate<F: FoldOps>(krate: Crate, fold_ops: F) -> (Crate, Map) {
-    let map = Map { map: RefCell::new(~[]) };
+    let map = Map { map: RefCell::new(Vec::new()) };
     let krate = {
         let mut cx = Ctx {
             map: &map,
@@ -541,7 +536,7 @@ pub fn map_crate<F: FoldOps>(krate: Crate, fold_ops: F) -> (Crate, Map) {
         cx.fold_crate(krate)
     };
 
-    if log_enabled!(logging::DEBUG) {
+    if log_enabled!(::log::DEBUG) {
         let map = map.map.borrow();
         // This only makes sense for ordered stores; note the
         // enumerate to count the number of entries.
@@ -565,7 +560,7 @@ pub fn map_crate<F: FoldOps>(krate: Crate, fold_ops: F) -> (Crate, Map) {
 // crate.  The `path` should be the path to the item but should not include
 // the item itself.
 pub fn map_decoded_item<F: FoldOps>(map: &Map,
-                                    path: ~[PathElem],
+                                    path: Vec<PathElem> ,
                                     fold_ops: F,
                                     fold: |&mut Ctx<F>| -> InlinedItem)
                                     -> InlinedItem {
@@ -647,9 +642,6 @@ fn node_id_to_str(map: &Map, id: NodeId) -> ~str {
         }
         Some(NodeExpr(expr)) => {
             format!("expr {} (id={})", pprust::expr_to_str(expr), id)
-        }
-        Some(NodeCalleeScope(expr)) => {
-            format!("callee_scope {} (id={})", pprust::expr_to_str(expr), id)
         }
         Some(NodeStmt(stmt)) => {
             format!("stmt {} (id={})", pprust::stmt_to_str(stmt), id)

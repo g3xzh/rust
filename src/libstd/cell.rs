@@ -10,41 +10,45 @@
 
 //! Types dealing with dynamic mutability
 
-use clone::{Clone, DeepClone};
-use cmp::Eq;
-use ops::Drop;
-use option::{None, Option, Some};
 use cast;
+use clone::Clone;
+use cmp::Eq;
+use fmt;
 use kinds::{marker, Pod};
+use ops::{Deref, DerefMut, Drop};
+use option::{None, Option, Some};
+use ty::Unsafe;
 
 /// A mutable memory location that admits only `Pod` data.
 pub struct Cell<T> {
-    priv value: T,
+    priv value: Unsafe<T>,
     priv marker1: marker::InvariantType<T>,
     priv marker2: marker::NoFreeze,
+    priv marker3: marker::NoShare,
 }
 
 impl<T:Pod> Cell<T> {
     /// Creates a new `Cell` containing the given value.
     pub fn new(value: T) -> Cell<T> {
         Cell {
-            value: value,
+            value: Unsafe{value: value, marker1: marker::InvariantType::<T>},
             marker1: marker::InvariantType::<T>,
             marker2: marker::NoFreeze,
+            marker3: marker::NoShare,
         }
     }
 
     /// Returns a copy of the contained value.
     #[inline]
     pub fn get(&self) -> T {
-        self.value
+        unsafe{ *self.value.get() }
     }
 
     /// Sets the contained value.
     #[inline]
     pub fn set(&self, value: T) {
         unsafe {
-            *cast::transmute_mut(&self.value) = value
+            *self.value.get() = value;
         }
     }
 }
@@ -55,13 +59,26 @@ impl<T:Pod> Clone for Cell<T> {
     }
 }
 
+impl<T:Eq + Pod> Eq for Cell<T> {
+    fn eq(&self, other: &Cell<T>) -> bool {
+        self.get() == other.get()
+    }
+}
+
+impl<T: fmt::Show> fmt::Show for Cell<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f.buf, r"Cell \{ value: {} \}", unsafe{*&self.value.get()})
+    }
+}
+
 /// A mutable memory location with dynamically checked borrow rules
 pub struct RefCell<T> {
-    priv value: T,
+    priv value: Unsafe<T>,
     priv borrow: BorrowFlag,
     priv marker1: marker::InvariantType<T>,
     priv marker2: marker::NoFreeze,
     priv marker3: marker::NoPod,
+    priv marker4: marker::NoShare,
 }
 
 // Values [1, MAX-1] represent the number of `Ref` active
@@ -77,7 +94,8 @@ impl<T> RefCell<T> {
             marker1: marker::InvariantType::<T>,
             marker2: marker::NoFreeze,
             marker3: marker::NoPod,
-            value: value,
+            marker4: marker::NoShare,
+            value: Unsafe{value: value, marker1: marker::InvariantType::<T>},
             borrow: UNUSED,
         }
     }
@@ -85,7 +103,7 @@ impl<T> RefCell<T> {
     /// Consumes the `RefCell`, returning the wrapped value.
     pub fn unwrap(self) -> T {
         assert!(self.borrow == UNUSED);
-        self.value
+        unsafe{self.value.unwrap()}
     }
 
     unsafe fn as_mut<'a>(&'a self) -> &'a mut RefCell<T> {
@@ -185,7 +203,7 @@ impl<T> RefCell<T> {
     #[inline]
     pub fn set(&self, value: T) {
         let mut reference = self.borrow_mut();
-        *reference.get() = value
+        *reference.get() = value;
     }
 }
 
@@ -206,13 +224,6 @@ impl<T: Clone> Clone for RefCell<T> {
     fn clone(&self) -> RefCell<T> {
         let x = self.borrow();
         RefCell::new(x.get().clone())
-    }
-}
-
-impl<T: DeepClone> DeepClone for RefCell<T> {
-    fn deep_clone(&self) -> RefCell<T> {
-        let x = self.borrow();
-        RefCell::new(x.get().deep_clone())
     }
 }
 
@@ -241,7 +252,14 @@ impl<'b, T> Ref<'b, T> {
     /// Retrieve an immutable reference to the stored value.
     #[inline]
     pub fn get<'a>(&'a self) -> &'a T {
-        &self.parent.value
+        unsafe{ &*self.parent.value.get() }
+    }
+}
+
+impl<'b, T> Deref<T> for Ref<'b, T> {
+    #[inline]
+    fn deref<'a>(&'a self) -> &'a T {
+        unsafe{ &*self.parent.value.get() }
     }
 }
 
@@ -262,7 +280,21 @@ impl<'b, T> RefMut<'b, T> {
     /// Retrieve a mutable reference to the stored value.
     #[inline]
     pub fn get<'a>(&'a mut self) -> &'a mut T {
-        &mut self.parent.value
+        unsafe{ &mut *self.parent.value.get() }
+    }
+}
+
+impl<'b, T> Deref<T> for RefMut<'b, T> {
+    #[inline]
+    fn deref<'a>(&'a self) -> &'a T {
+        unsafe{ &*self.parent.value.get() }
+    }
+}
+
+impl<'b, T> DerefMut<T> for RefMut<'b, T> {
+    #[inline]
+    fn deref_mut<'a>(&'a mut self) -> &'a mut T {
+        unsafe{ &mut *self.parent.value.get() }
     }
 }
 
@@ -273,11 +305,14 @@ mod test {
     #[test]
     fn smoketest_cell() {
         let x = Cell::new(10);
+        assert_eq!(x, Cell::new(10));
         assert_eq!(x.get(), 10);
         x.set(20);
+        assert_eq!(x, Cell::new(20));
         assert_eq!(x.get(), 20);
 
         let y = Cell::new((30, 40));
+        assert_eq!(y, Cell::new((30, 40)));
         assert_eq!(y.get(), (30, 40));
     }
 
